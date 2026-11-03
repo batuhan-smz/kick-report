@@ -1,22 +1,30 @@
-# Kick Report (prototip)
+# Kick Report
 
-PUBG maçlarındaki öldürme / düşürme / ölüm anlarını bulur, aynı saatte açık olan Kick yayınını o saniyeden oynatır.
+PUBG maçlarındaki öldürme / düşürme / ölüm anlarını bulur, karşılaşılan yayıncının Kick yayınını o saniyeden oynatır.
 
-## Kurulum
+**Canlı site:** https://kick-report-ten.vercel.app
 
-1. Node.js 18 veya üstü kur.
+## Yayın (Vercel)
+
+Site Vercel'de, `main` dalına her `git push` sonrası otomatik yayınlanır.
+
+| Parça | Nerede |
+| --- | --- |
+| Sayfalar (`public/`) | Vercel statik dosyaları |
+| API, `assetlinks.json` | Tek sunucusuz fonksiyon: `api/index.js` → `server.js` (bölge: `fra1`) |
+| Yayıncı listesi, keşif durumu | Özel Vercel Blob deposu `kick-report-data` (`store.js`) |
+| Otomatik bulma | GitHub Actions her 30 dk `/api/cron/discovery` çağırır (`.github/workflows/discovery.yml`) |
+
+Vercel ortam değişkenleri (Production): `PUBG_API_KEY`, `ADMIN_PASSWORD`, `CRON_SECRET`, `TWA_SHA256`, `BLOB_READ_WRITE_TOKEN` (Blob deposu bağlanınca otomatik). GitHub Actions ayarları: secret `CRON_SECRET` (Vercel'dekiyle aynı), variable `SITE_URL`. Örnek: `.env.example`.
+
+Başka bir kurulumdan (ör. yerel `data/` klasörü) veri taşımak için yönetici olarak `POST /api/admin/import` uç noktasına `{ "streamers": [...], "discovery": {...} }` gönder.
+
+## Yerelde çalıştırma
+
+1. Node.js 18 veya üstü kur, `npm install` çalıştır.
 2. https://developer.pubg.com adresinden ücretsiz bir PUBG API anahtarı al.
-3. Bu klasörde:
-
-```bash
-# macOS / Linux
-PUBG_API_KEY=anahtarin ADMIN_PASSWORD=yonetici-sifresi npm start
-
-# Windows PowerShell
-$env:PUBG_API_KEY="anahtarin"; $env:ADMIN_PASSWORD="yonetici-sifresi"; npm start
-```
-
-4. Tarayıcıda http://localhost:3000 adresini aç.
+3. `.env.example` dosyasını `.env` olarak kopyalayıp `PUBG_API_KEY` değerini yaz, sonra `npm start`.
+4. Tarayıcıda http://localhost:3000 adresini aç. Yerelde veriler `data/` klasöründe tutulur ve otomatik bulma her dakika arka planda çalışır.
 5. Sunucu açık kaldıkça Kick'te PUBG yayını yapan kanalları kendisi bulur ve ekler (aşağıya bak). Liste `data/streamers.json` dosyasına yazılır.
 
 ### Yönetici sayfası
@@ -121,7 +129,8 @@ Site ayrıca bir PWA: `manifest.webmanifest`, `sw.js` (bağlantı yokken son aç
 - Otomatik bulma sadece Steam'de arar. Kakao ve konsol yayıncıları elle eklenmeli.
 - Kick'in canlı yayın listesi de resmi olmayan bir uç nokta. Kick sunucu isteklerini engellerse Yayıncılar sayfasında "Son hata" olarak görünür.
 - Tek bir yönetici şifresi var, kullanıcı hesabı yok. Siteyi internete açacaksan HTTPS arkasında çalıştır, yoksa şifre ağda açık metin gider.
-- Önbellek bellekte tutuluyor, sunucu yeniden başlayınca siliniyor.
+- Maç ve telemetri önbelleği bellekte tutuluyor; Vercel'de her fonksiyon örneğinin kendi önbelleği var ve kısa ömürlü.
+- Vercel'de PUBG istek sayacı fonksiyon örneği başına tutuluyor; aynı anda çok sayıda arama olursa PUBG'nin dakikalık limitine (429) takılınabilir.
 
 ## Büyütmek için yapılacaklar
 

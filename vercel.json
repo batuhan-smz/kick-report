@@ -4,15 +4,40 @@
   "buildCommand": "",
   "outputDirectory": "public",
   "functions": {
-    "api/index.js": { "maxDuration": 60 }
+    "api/index.js": {
+      "maxDuration": 60
+    }
   },
   "rewrites": [
-    { "source": "/.well-known/assetlinks.json", "destination": "/api/index?__path=/.well-known/assetlinks.json" },
-    { "source": "/api/:path*", "destination": "/api/index?__path=/api/:path*" },
-    { "source": "/players/:path*", "destination": "/index.html" },
-    { "source": "/streamers", "destination": "/index.html" }
+    {
+      "source": "/.well-known/assetlinks.json",
+      "destination": "/api/index?__path=/.well-known/assetlinks.json"
+    },
+    {
+      "source": "/api/:path*",
+      "destination": "/api/index?__path=/api/:path*"
+    },
+    {
+      "source": "/players/:path*",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/streamers",
+      "destination": "/index.html"
+    }
   ],
   "headers": [
-    { "source": "/sw.js", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] }
+    {
+      "source": "/sw.js",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-cache"
+        }
+      ]
+    }
+  ],
+  "regions": [
+    "fra1"
   ]
 }

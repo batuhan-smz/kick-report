@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kick Report</title>
+  <meta name="description" content="PUBG öldürme anlarını, karşılaşılan yayıncının Kick yayınından izle.">
+  <meta name="theme-color" content="#0a0d0e">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-in">
+      <a href="/" data-link class="brand" aria-label="Kick Report ana sayfa">
+        <svg class="logo" viewBox="0 0 512 512" aria-hidden="true">
+          <g fill="none" stroke="currentColor" stroke-width="40" stroke-linecap="round">
+            <circle cx="256" cy="256" r="138"/>
+            <path d="M256 70v84M256 358v84M70 256h84M358 256h84"/>
+          </g>
+          <circle cx="256" cy="256" r="48" fill="currentColor"/>
+        </svg>
+        <span class="wordmark"><span class="accent">Kick</span> Report</span>
+      </a>
+      <form id="topSearch" class="search mini" hidden>
+        <input name="name" placeholder="Oyuncu ara…" autocomplete="off" required>
+        <select name="shard" aria-label="Platform">
+          <option value="steam">Steam</option>
+          <option value="kakao">Kakao</option>
+          <option value="console">Konsol</option>
+        </select>
+        <button type="submit" aria-label="Ara">Ara</button>
+      </form>
+      <nav>
+        <a href="/" data-link>Ana sayfa</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="app"></main>
+
+  <div id="modal" class="modal" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true" aria-label="Video">
+      <div class="modal-top">
+        <div id="modalTitle" class="modal-title"></div>
+        <button id="modalClose" class="icon" aria-label="Kapat">✕</button>
+      </div>
+      <video id="video" controls playsinline></video>
+      <div class="modal-bar">
+        <button id="prevBtn" class="ghost">‹ Önceki</button>
+        <div id="modalInfo" class="modal-info"></div>
+        <button id="nextBtn" class="ghost">Sonraki ›</button>
+      </div>
+      <div class="modal-sync">
+        <label>Olaydan önce başla <input id="lead" type="number" value="10" min="0" max="120"> sn</label>
+        <label title="Video ile oyun saati arasında kayma varsa düzelt. Pozitif değer videoyu ileri alır.">Senkron düzeltme <input id="syncFix" type="number" value="0" step="1"> sn</label>
+        <a id="kickLink" target="_blank" rel="noopener">Kick'te aç ↗</a>
+      </div>
+    </div>
+  </div>
+
+  <footer class="site-footer">
+    <div class="footer-in">
+      <div class="footer-top">
+        <div class="footer-brand">
+          <a href="/" data-link class="brand" aria-label="Kick Report ana sayfa">
+            <svg class="logo" viewBox="0 0 512 512" aria-hidden="true">
+              <g fill="none" stroke="currentColor" stroke-width="40" stroke-linecap="round">
+                <circle cx="256" cy="256" r="138"/>
+                <path d="M256 70v84M256 358v84M70 256h84M358 256h84"/>
+              </g>
+              <circle cx="256" cy="256" r="48" fill="currentColor"/>
+            </svg>
+            <span class="wordmark"><span class="accent">Kick</span> Report</span>
+          </a>
+          <p>PUBG öldürme anlarını, karşılaşılan yayıncının Kick yayınından izle.</p>
+        </div>
+
+        <div class="footer-community">
+          <h2>Topluluk ve destek</h2>
+          <div class="footer-actions">
+          <a class="discord-btn" href="https://discord.gg/8dHrKbCjRt" target="_blank" rel="noopener noreferrer">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M20.317 4.3698a19.7913 19.7913 0 0 0-4.8851-1.5152.0741.0741 0 0 0-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 0 0-.0785-.037 19.7363 19.7363 0 0 0-4.8852 1.515.0699.0699 0 0 0-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 0 0 .0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 0 0 .0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 0 0-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 0 1-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 0 1 .0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 0 1 .0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 0 1-.0066.1276 12.2986 12.2986 0 0 1-1.873.8914.0766.0766 0 0 0-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 0 0 .0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 0 0 .0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 0 0-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189z"/></svg>
+            <span><b>Discord sunucumuza katıl</b><small>discord.gg/8dHrKbCjRt</small></span>
+          </a>
+          <a class="coffee-btn" href="https://buymeacoffee.com/batuhansemiz" target="_blank" rel="noopener noreferrer">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 9h13v5a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5V9z" fill="currentColor" fill-opacity=".18"/>
+              <path d="M17 10h1.5a2.5 2.5 0 0 1 0 5H17"/>
+              <path d="M8 2.5c-.6.8-.6 1.7 0 2.5M11.5 2.5c-.6.8-.6 1.7 0 2.5M15 2.5c-.6.8-.6 1.7 0 2.5"/>
+              <path d="M3 22h15"/>
+            </svg>
+            <span><b>Bana bir kahve ısmarla</b><small>buymeacoffee.com/batuhansemiz</small></span>
+          </a>
+          </div>
+        </div>
+      </div>
+
+      <div class="footer-bottom">
+        <p class="copyright">© <span id="year">2026</span> <a class="company" href="https://forcestudio.com.tr/" target="_blank" rel="noopener">Force Business</a>. Tüm hakları saklıdır.</p>
+        <p class="legal">Kick ve PUBG: BATTLEGROUNDS, ilgili sahiplerinin ticari markalarıdır. Kick Report bu şirketlerle bağlantılı değildir ve onlar tarafından desteklenmemektedir.</p>
+      </div>
+    </div>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

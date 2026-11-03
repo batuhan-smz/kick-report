@@ -1,0 +1,10 @@
+# Gizli: imza anahtarı ve şifresi. Ayrıca güvenli bir yere yedekle!
+keystore/
+# Bilgisayara özel / derleme çıktıları
+local.properties
+.gradle/
+build/
+app/build/
+dist/
+.idea/
+*.iml

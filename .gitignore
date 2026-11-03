@@ -1,0 +1,24 @@
+# Bağımlılıklar
+node_modules/
+
+# Gizli ayarlar ve yerel veri (repoya ASLA girmez)
+.env
+.env.*
+!.env.example
+data/
+
+# Vercel
+.vercel/
+
+# Android: imza anahtarı ve derleme çıktıları (ayrıntı: android/.gitignore)
+android/keystore/
+android/local.properties
+android/.gradle/
+android/build/
+android/app/build/
+android/dist/
+
+# Diğer
+*.log
+.DS_Store
+Thumbs.db

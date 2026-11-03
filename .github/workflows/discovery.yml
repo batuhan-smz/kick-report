@@ -1,0 +1,32 @@
+# Otomatik yayıncı bulma: Vercel'de arka plan işlemi olmadığı için GitHub her 30 dakikada bir
+# sitedeki şifreli turu çağırır. Gerekli ayarlar (repo > Settings > Secrets and variables > Actions):
+#   Secret   CRON_SECRET : Vercel'deki CRON_SECRET ile aynı değer
+#   Variable SITE_URL    : sitenin adresi, ör. https://kick-report.vercel.app
+name: Yayıncı keşfi
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: discovery
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Otomatik bulma turunu çalıştır
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          SITE_URL: ${{ vars.SITE_URL }}
+        run: |
+          if [ -z "$CRON_SECRET" ] || [ -z "$SITE_URL" ]; then
+            echo "::error::CRON_SECRET (secret) ve SITE_URL (variable) ayarlanmalı"; exit 1
+          fi
+          curl -sS --fail-with-body --max-time 120 \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            "$SITE_URL/api/cron/discovery"
+          echo

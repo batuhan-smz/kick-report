@@ -103,7 +103,11 @@ server.listen(4000, async () => {
   await p.goto('http://localhost:4000/');
   await p.waitForSelector('.streamer-card');
   assert.strictEqual(await p.locator('.streamer-card').count(), 4);
-  await shot('home');
+  // platform seçimi ve "Ana sayfa" butonu yok; ilk ziyarette son görüntülenenler boş
+  assert.strictEqual(await p.locator('select').count(), 0);
+  assert.strictEqual(await p.locator('nav').count(), 0);
+  assert.ok(await p.isHidden('#recent'));
+  assert.ok(!(await p.textContent('.streamer-card')).includes('Steam'));
   await p.fill('#heroSearch input[name=name]', 'Me');
   await p.click('#heroSearch button');
   await p.waitForSelector('.card', { timeout: 15000 });
@@ -161,6 +165,20 @@ server.listen(4000, async () => {
   console.log('codec uyarısı:', err);
   assert.ok(err.includes('H.264'));
   await p2.close();
+  // son görüntülenenler: bulunan oyuncu ana sayfada arama kutusunun altında listelenir
+  await p.goto('http://localhost:4000/');
+  await p.waitForSelector('#recent .recent-chip');
+  assert.deepStrictEqual(await p.$$eval('#recent .recent-chip a', (els) => els.map((e) => e.textContent)), ['Me']);
+  await shot('home');
+  await p.reload(); // sayfa yenilenince korunur
+  await p.waitForSelector('#recent .recent-chip');
+  await p.click('#recent .recent-chip a');
+  await p.waitForSelector('.card');
+  assert.strictEqual(new URL(p.url()).pathname, '/players/steam/Me');
+  await p.goto('http://localhost:4000/');
+  await p.waitForSelector('#recent .recent-chip');
+  await p.click('#recent [data-remove="Me"]');
+  assert.ok(await p.isHidden('#recent'));
   // yayıncılar sayfası: menüde bağlantısı yok, sadece adresle açılır ve şifre ister
   assert.strictEqual(await p.locator('a[href="/streamers"]').count(), 0);
   await p.goto('http://localhost:4000/streamers');

@@ -13,7 +13,6 @@ const SUFFIX = DEMO ? '?demo=1' : '';
 
 const LABELS = { kill: 'Öldürme', knock: 'Düşürme', death: 'Ölüm', knocked: 'Düştü', start: 'Maç başı' };
 const ROLE_LABEL = { own: 'Kendi yayını', enemy: 'Rakip tepkisi', other: 'Aynı maç' };
-const SHARD_LABEL = { steam: 'Steam', kakao: 'Kakao', console: 'Konsol' };
 const MATCH_GRACE_MS = 60_000; // VOD sınırlarında küçük tolerans
 
 let hls = null;
@@ -148,7 +147,6 @@ function route() {
   closeModal();
   runId++;
   const parts = location.pathname.split('/').filter(Boolean);
-  document.querySelectorAll('nav a').forEach((a) => a.classList.toggle('on', a.getAttribute('href') === (location.pathname === '/' ? '/' : '/' + parts[0])));
   $('topSearch').hidden = !parts.length;
   window.scrollTo(0, 0);
   if (parts[0] === 'players' && parts[1] && parts[2]) return playerPage(parts[1], decodeURIComponent(parts[2]));
@@ -160,7 +158,7 @@ function bindSearch(form) {
   form.onsubmit = (e) => {
     e.preventDefault();
     const name = form.elements.name.value.trim();
-    if (name) navigate(playerPath(form.elements.shard.value, name));
+    if (name) navigate(playerPath('steam', name));
   };
 }
 bindSearch($('topSearch'));
@@ -191,7 +189,7 @@ function hydrateAvatars(root) {
 function streamerCard(s) {
   return `<a class="streamer-card" href="${playerPath(s.shard, s.pubgName)}" data-link>
     ${avatarHTML(s)}
-    <span class="sc-text"><b>${esc(s.kick)}</b><small>${esc(s.pubgName)} · ${esc(SHARD_LABEL[s.shard] || s.shard)}</small></span>
+    <span class="sc-text"><b>${esc(s.kick)}</b><small>${esc(s.pubgName)}</small></span>
     <span class="live-pill" data-live="${esc(s.kick)}" ${s.live ? '' : 'hidden'}>CANLI</span>
   </a>`;
 }
@@ -209,6 +207,34 @@ function discoveryText(d) {
     `${t.notfound + t.nomatch} kanalın PUBG adı bulunamadı.` + (d.lastError ? ` <span class="err">Son hata: ${esc(d.lastError)}</span>` : '');
 }
 
+// ---------- son görüntülenenler ----------
+// Her ziyaretçinin kendi tarayıcısında tutulur (localStorage); erişilemezse sessizce boş kalır.
+const RECENT_KEY = 'kr_recent';
+const RECENT_MAX = 8;
+function getRecent() {
+  try { const list = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]'); return Array.isArray(list) ? list.filter((x) => typeof x === 'string') : []; } catch { return []; }
+}
+function setRecent(list) {
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, RECENT_MAX))); } catch { /* gizli pencere vb. */ }
+}
+function addRecent(name) {
+  setRecent([name, ...getRecent().filter((x) => !same(x, name))]);
+}
+function drawRecent() {
+  const box = $('recent');
+  if (!box) return;
+  const list = getRecent();
+  box.hidden = !list.length;
+  if (!list.length) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div class="recent-head"><span>Son görüntülenenler</span><button type="button" class="link-btn" data-clear>Temizle</button></div>
+    <div class="recent-list">${list.map((n) => `<span class="recent-chip"><a href="${playerPath('steam', n)}" data-link>${esc(n)}</a><button type="button" aria-label="${esc(n)} listeden kaldır" data-remove="${esc(n)}">✕</button></span>`).join('')}</div>`;
+  box.onclick = (e) => {
+    const rm = e.target.closest('[data-remove]');
+    if (rm) { setRecent(getRecent().filter((x) => x !== rm.dataset.remove)); drawRecent(); }
+    if (e.target.closest('[data-clear]')) { setRecent([]); drawRecent(); }
+  };
+}
+
 // ---------- ana sayfa ----------
 async function homePage() {
   const app = $('app');
@@ -218,13 +244,9 @@ async function homePage() {
       <p>Bir oyuncu adı yaz. Bir yayıncıyı vurduğu ya da bir yayıncı tarafından vurulduğu anları, o yayıncının kendi yayınından görürsün: birebir tepkiler.</p>
       <form id="heroSearch" class="search big">
         <input name="name" placeholder="PUBG oyuncu adı (büyük/küçük harf önemli)" autocomplete="off" required>
-        <select name="shard" aria-label="Platform">
-          <option value="steam">Steam</option>
-          <option value="kakao">Kakao</option>
-          <option value="console">Konsol</option>
-        </select>
         <button type="submit">Ara</button>
       </form>
+      <div id="recent" class="recent" hidden></div>
       ${DEMO ? '<p class="note">Demo modu: PUBG verisi sahte, video ilk kayıtlı yayıncının gerçek Kick yayınından.</p>' : ''}
     </section>
     <section>
@@ -233,6 +255,7 @@ async function homePage() {
     </section>`;
   bindSearch($('heroSearch'));
   $('heroSearch').elements.name.focus();
+  drawRecent();
   const my = runId;
   await loadStreamers();
   if (my !== runId) return;
@@ -309,7 +332,6 @@ async function adminStreamersPage() {
       <summary>Elle yayıncı ekle</summary>
       <form id="addStreamer" class="add-form">
         <label>PUBG adı<input name="pubgName" required placeholder="örn. chocoTaco" autocomplete="off"></label>
-        <label>Platform<select name="shard"><option value="steam">Steam</option><option value="kakao">Kakao</option><option value="console">Konsol</option></select></label>
         <label>Kick kanalı<input name="kick" required placeholder="örn. kanaladi" autocomplete="off"></label>
         <button type="submit">Ekle</button>
       </form>
@@ -339,7 +361,7 @@ async function adminStreamersPage() {
   const form = $('addStreamer');
   form.onsubmit = async (e) => {
     e.preventDefault();
-    const ok = await add({ pubgName: form.elements.pubgName.value.trim(), shard: form.elements.shard.value, kick: form.elements.kick.value.trim() }, form.querySelector('button'));
+    const ok = await add({ pubgName: form.elements.pubgName.value.trim(), shard: 'steam', kick: form.elements.kick.value.trim() }, form.querySelector('button'));
     if (ok) form.reset();
   };
 
@@ -360,7 +382,7 @@ async function adminStreamersPage() {
       const row = document.createElement('div');
       row.className = 'streamer-row';
       row.innerHTML = `${avatarHTML(s)}
-        <span class="sc-text"><b>${esc(s.kick)}</b><small>${esc(s.pubgName)} · ${esc(SHARD_LABEL[s.shard] || s.shard)}</small></span>
+        <span class="sc-text"><b>${esc(s.kick)}</b><small>${esc(s.pubgName)}</small></span>
         <span class="live-pill" data-live="${esc(s.kick)}" ${s.live ? '' : 'hidden'}>CANLI</span>
         ${sourceBadge(s)}
         <a href="${playerPath(s.shard, s.pubgName)}" data-link class="ghost-link">Anları</a>
@@ -432,12 +454,11 @@ async function playerPage(shard, name) {
   const my = runId;
   const app = $('app');
   $('topSearch').elements.name.value = name;
-  $('topSearch').elements.shard.value = shard;
   document.title = `${name} · Kick Report`;
   app.innerHTML = `
     <section class="player-head">
       <div class="ph-avatar">${initial(name)}</div>
-      <div><h1 id="playerName">${esc(name)}</h1><div class="muted">${esc(SHARD_LABEL[shard] || shard)}</div></div>
+      <div><h1 id="playerName">${esc(name)}</h1></div>
       <div id="stats" class="stats"></div>
     </section>
     <div id="progress" class="progress"><div class="bar"></div><span id="progressText">Hazırlanıyor…</span></div>
@@ -465,6 +486,7 @@ async function playerPage(shard, name) {
       const player = await getJSON(`/api/pubg/${shard}/player/${encodeURIComponent(name)}`);
       if (my !== runId) return;
       playerName = player.name;
+      addRecent(player.name); // sadece gerçekten bulunan oyuncular, PUBG'deki doğru yazımıyla
       $('playerName').textContent = player.name;
       const ids = player.matchIds.slice(0, 20);
       if (!ids.length) throw new Error('Son 14 günde maç bulunamadı.');

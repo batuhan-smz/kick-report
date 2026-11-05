@@ -219,6 +219,71 @@ server.listen(4000, async () => {
   console.log('codec uyarısı:', err);
   assert.ok(err.includes('H.264'));
   await p2.close();
+  // --- Abonelere özel kayıt: bobkanal'ın kaydı subscriber_only (adres yok). Kartlar aynı yayından (555)
+  // alınmış, o anı kapsayan kliplerden çıkmalı. Klipler iki sayfada: ilk sayfadaki klip olayı kapsıyor ama
+  // başka bir yayından (999), yok sayılmalı. İkinci sayfadaki clip_ok 22:05:03–22:05:31 aralığında:
+  // öldürmeyi (22:05:10) kapsıyor, düşürmeyi (22:05:00.1) kapsamıyor.
+  const p3 = await b.newPage({ viewport: { width: 1280, height: 1000 } });
+  p3.on('pageerror', e => console.log('pageerror', e.message));
+  const clipCalls = [];
+  const clip = (id, ls, created) => ({ id, livestream_id: ls, created_at: created, duration: 28, privacy: 'public',
+    video_url: `https://clips.kick.com/clips/aa/${id}/playlist.m3u8`, thumbnail_url: null, title: id });
+  await p3.route('https://kick.com/api/v2/**', r => {
+    const u = new URL(r.request().url());
+    const hdr = { 'access-control-allow-origin': '*' };
+    if (u.pathname.endsWith('/clips')) {
+      clipCalls.push(u.pathname.split('/')[4] + (u.searchParams.get('cursor') ? '+cursor' : ''));
+      const page = u.searchParams.get('cursor')
+        ? { clips: [clip('clip_ok', 555, '2026-11-02T22:07:00Z'), clip('clip_old', 555, '2026-11-02T21:50:00Z')], nextCursor: null }
+        : { clips: [clip('clip_new', 555, '2026-11-03T01:00:00Z'), clip('clip_other', 999, '2026-11-02T22:06:00Z')], nextCursor: '{"view":0,"id":"clip_other"}' };
+      return r.fulfill({ contentType: 'application/json', headers: hdr, body: JSON.stringify(page) });
+    }
+    const locked = u.pathname.includes('/bobkanal/');
+    r.fulfill({ contentType: 'application/json', headers: hdr, body: JSON.stringify([locked
+      ? { id: 555, start_time: '2026-11-02 21:28:33', duration: 44840000, is_live: false, source: null, session_title: 't', video: { uuid: 'u2', status: 'subscriber_only', is_private: true } }
+      : { id: 777, start_time: '2026-11-02 21:28:33', duration: 44840000, is_live: false, source: 'https://stream.kick.com/x/master.m3u8', session_title: 't', video: { uuid: 'u1' } }]) });
+  });
+  const clipPlaylist = (fromIso, segs) => ['#EXTM3U', '#EXT-X-VERSION:4', '#EXT-X-TARGETDURATION:2']
+    .concat(...Array.from({ length: segs }, (_, i) => ['#EXT-X-PROGRAM-DATE-TIME:' + new Date(Date.parse(fromIso) + i * 2000).toISOString(), '#EXTINF:2.000,', '1.ts']))
+    .concat('#EXT-X-ENDLIST').join('\n');
+  const CLIP_FROM = { clip_ok: '2026-11-02T22:05:03Z', clip_other: '2026-11-02T22:04:50Z', clip_new: '2026-11-02T23:00:00Z', clip_old: '2026-11-02T21:49:00Z' };
+  await p3.route('https://clips.kick.com/**', r => {
+    const id = r.request().url().split('/')[5];
+    if (!r.request().url().endsWith('playlist.m3u8') || !CLIP_FROM[id]) return r.fulfill({ status: 404, body: '' });
+    r.fulfill({ headers: { 'access-control-allow-origin': '*', 'content-type': 'application/vnd.apple.mpegurl' }, body: clipPlaylist(CLIP_FROM[id], 14) });
+  });
+  await p3.route('https://stream.kick.com/**', r => {
+    const u = r.request().url();
+    const hdr = { 'access-control-allow-origin': '*', 'content-type': 'application/vnd.apple.mpegurl' };
+    if (u.endsWith('master.m3u8')) return r.fulfill({ headers: hdr, body: '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=230000,CODECS="avc1.4D401F,mp4a.40.2",RESOLUTION=284x160\n160p30/playlist.m3u8' });
+    if (u.endsWith('playlist.m3u8')) return r.fulfill({ headers: hdr, body: playlist });
+    r.fulfill({ status: 404, body: '' });
+  });
+  await p3.goto('http://localhost:4000/players/steam/Me');
+  await p3.waitForSelector('.card', { timeout: 15000 });
+  const rows3 = await p3.$$eval('.card', els => els.map(e => e.innerText.replace(/\s+/g, ' ')));
+  console.log('klip kartları:', rows3);
+  // klipler sadece kilitli kanal için, iki sayfa (ikincisi cursor ile) çekilmeli
+  assert.deepStrictEqual(clipCalls, ['bobkanal', 'bobkanal+cursor']);
+  // 4 kendi yayını kartı (testkanal, açık kayıt) + 1 klip kartı (öldürme). Düşürmeyi kapsayan klip yok.
+  assert.strictEqual(rows3.length, 5);
+  const clipRows = rows3.filter(r => r.includes('bobkanal'));
+  assert.strictEqual(clipRows.length, 1);
+  // 22:05:10 − klip başlangıcı 22:05:03 = 0:07
+  assert.ok(/Rakip tepkisi Klip 0:07 .*Öldürme Me → Bob/iu.test(clipRows[0]), clipRows[0]);
+  assert.ok(rows3.filter(r => r.includes('testkanal')).every(r => !r.includes('Klip')));
+  assert.ok(!(await p3.textContent('.match-head')).includes('bobkanal')); // kilitli kayıt için "maç başı" düğmesi yok
+  assert.ok((await p3.textContent('#matches')).includes('1 an abonelere özel bir yayında kaldı'));
+  await p3.click('.card.enemy');
+  await p3.waitForTimeout(500);
+  const info3 = await p3.textContent('#modalInfo');
+  console.log('klip modal:', info3);
+  // 10 sn önceden başla → 22:05:00, klip 22:05:03'te başlıyor → klibin başı
+  assert.ok(info3.includes('Klip') && info3.includes('bobkanal') && info3.includes('0:00'), info3);
+  assert.strictEqual(await p3.getAttribute('#kickLink', 'href'), 'https://kick.com/bobkanal/clips/clip_ok');
+  if (process.env.SHOT_DIR) await p3.screenshot({ path: path.join(process.env.SHOT_DIR, 'clips.png'), fullPage: true });
+  await p3.close();
+  console.log('Klip OK');
   // son görüntülenenler: bulunan oyuncu ana sayfada arama kutusunun altında listelenir
   await p.goto('http://localhost:4000/');
   await p.waitForSelector('#recent .recent-chip');

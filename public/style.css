@@ -169,6 +169,8 @@ button.more { display: block; margin: 12px auto 0; }
 .thumb .ts { position: absolute; right: 8px; bottom: 8px; z-index: 1; background: rgba(0, 0, 0, .75); font-size: 12px; font-weight: 700; padding: 1px 6px; border-radius: 4px; font-variant-numeric: tabular-nums; }
 .role-badge { font-size: 11px; font-weight: 800; padding: 2px 7px; border-radius: 5px; color: #000; display: inline-block; }
 .thumb .role-badge { position: absolute; left: 8px; top: 8px; z-index: 1; }
+.clip-badge { font-size: 11px; font-weight: 800; padding: 2px 7px; border-radius: 5px; background: #fff; color: #000; display: inline-block; letter-spacing: .02em; }
+.thumb .clip-badge { position: absolute; right: 8px; top: 8px; z-index: 1; }
 .role-badge.own { background: var(--own); } .role-badge.enemy { background: var(--enemy); color: #fff; } .role-badge.other { background: var(--other); }
 .card-body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .vs { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 15px; }

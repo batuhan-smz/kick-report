@@ -23,6 +23,8 @@ let modalIndex = -1;
 let runId = 0;        // eski aramaların sonuçları yeni sayfayı ezmesin
 const vodCache = new Map();     // kick kanalı -> Promise<vod[]>
 const channelCache = new Map(); // kick kanalı -> Promise<{avatar, live}>
+const clipCache = new Map();    // kick kanalı -> { clips, cursor, done, oldest, pages, chain }
+const CLIP_MAX_PAGES = 15;      // kanal başına en fazla 15 × 20 klip taranır
 const streamersByGame = { pubg: [], lol: [] };
 
 // ---------- yardımcılar ----------
@@ -75,6 +77,7 @@ function memo(map, key, fn) {
 const GAMES = {
   pubg: {
     id: 'pubg', label: 'PUBG', home: '/',
+    clips: true, // abonelere özel kayıtlarda o anı kapsayan klipler aranır
     heroTitle: 'PUBG anlarını <span>Kick</span> yayınlarında izle',
     heroText: 'Bir oyuncu adı yaz. Bir yayıncıyı vurduğu ya da bir yayıncı tarafından vurulduğu anları, o yayıncının kendi yayınından görürsün: birebir tepkiler.',
     placeholder: 'PUBG oyuncu adı (büyük/küçük harf önemli)',
@@ -154,13 +157,16 @@ function getKickVods(slug) {
     if (res.status === 404) throw new Error(`Kick kanalı bulunamadı: ${slug}`);
     if (!res.ok) throw new Error(`Kick videoları alınamadı: ${slug} (${res.status})`);
     const list = await res.json();
+    // Abonelere özel kayıtlar (video.status = "subscriber_only") listede adressiz gelir. Atlanmaz,
+    // "kilitli" olarak tutulur: o kayıttaki anlar için aynı yayından alınmış klipler aranır.
     return list
-      .filter((v) => v.source && v.start_time)
+      .filter((v) => v.start_time && (v.source || v.video?.status === 'subscriber_only' || v.video?.is_private))
       .map((v) => {
         const start = kickTime(v.start_time);
         const end = v.is_live || !v.duration ? new Date() : new Date(start.getTime() + v.duration);
         const thumb = v.thumbnail?.src || v.thumbnail?.url || v.video?.thumb || null;
-        return { start, end, src: v.source, title: v.session_title, uuid: v.video?.uuid, live: v.is_live, thumb };
+        return { id: String(v.id ?? v.video?.live_stream_id ?? ''), start, end, src: v.source || null, locked: !v.source,
+          title: v.session_title, uuid: v.video?.uuid, live: v.is_live, thumb };
       });
   });
 }
@@ -177,7 +183,82 @@ function getKickChannel(slug) {
 
 function findVod(vods, date) {
   const t = date.getTime();
-  return vods.find((v) => t >= v.start.getTime() - MATCH_GRACE_MS && t <= v.end.getTime() + MATCH_GRACE_MS) || null;
+  const hits = vods.filter((v) => t >= v.start.getTime() - MATCH_GRACE_MS && t <= v.end.getTime() + MATCH_GRACE_MS);
+  return hits.find((v) => !v.locked) || hits[0] || null;
+}
+
+// Kanalın klipleri, en yeniden eskiye. sinceMs'den önce oluşturulan kliplere ulaşana kadar sayfa çekilir;
+// daha sonra daha eski bir an gerekirse kalan sayfalardan devam edilir.
+function getKickClips(slug, sinceMs) {
+  let e = clipCache.get(slug);
+  if (!e) clipCache.set(slug, (e = { clips: [], cursor: null, done: false, oldest: Infinity, pages: 0, chain: Promise.resolve() }));
+  e.chain = e.chain.then(async () => {
+    while (!e.done && e.oldest > sinceMs && e.pages < CLIP_MAX_PAGES) {
+      const q = new URLSearchParams({ sort: 'date', time: 'all' });
+      if (e.cursor) q.set('cursor', e.cursor);
+      const res = await fetch(`https://kick.com/api/v2/channels/${encodeURIComponent(slug)}/clips?${q}`);
+      if (!res.ok) throw new Error(`Kick klipleri alınamadı: ${slug} (${res.status})`);
+      const j = await res.json();
+      e.pages++;
+      for (const c of j.clips || []) {
+        const created = Date.parse(c.created_at);
+        e.oldest = Math.min(e.oldest, created);
+        const src = c.video_url || c.clip_url;
+        if (!src) continue;
+        e.clips.push({ id: c.id, livestreamId: String(c.livestream_id ?? ''), created, duration: c.duration || 0,
+          src, thumb: c.thumbnail_url || null, title: c.title || '' });
+      }
+      e.cursor = j.nextCursor || null;
+      if (!e.cursor || !(j.clips || []).length) e.done = true;
+    }
+    return e.clips;
+  }).catch(() => e.clips); // hata sonraki çağrıları kilitlemesin; elde olanla devam
+  return e.chain;
+}
+
+// Klibin kapsadığı gerçek saat aralığı: klip listesindeki segment saatlerinden (#EXT-X-PROGRAM-DATE-TIME)
+async function clipRange(clip) {
+  const segs = await getTimeline({ src: clip.src });
+  if (!segs.length || segs[0].pdt == null) return null;
+  const last = segs[segs.length - 1];
+  return { start: segs[0].pdt, end: last.pdt + last.dur * 1000 };
+}
+
+// Abonelere özel kayıtta kalan birebir anlar için aynı yayından alınmış, o anı kapsayan klibi bul.
+// Bulunan klip m.clips'e "kanal|olay sırası" anahtarıyla yazılır; kartlar oradan oluşur.
+async function attachClips(G, matches, player) {
+  const need = [];
+  for (const m of matches) {
+    m.clips = new Map();
+    (m.events || []).forEach((ev, i) => {
+      for (const st of m.streams || []) {
+        if (st.vod.locked && roleOf(G, st, player, ev) !== 'other') need.push({ m, st, ev, i, t: Date.parse(ev.time) });
+      }
+    });
+  }
+  if (!G.clips || !need.length) return;
+  const since = new Map();
+  for (const n of need) since.set(n.st.streamer.kick, Math.min(since.get(n.st.streamer.kick) ?? Infinity, n.t - 60_000));
+  const bySlug = new Map();
+  await pool([...since], 3, async ([slug, t]) => bySlug.set(slug, await getKickClips(slug, t)));
+  const ranges = new Map(); // klip id -> Promise<aralık>
+  const rangeOf = (c) => memo(ranges, c.id, () => clipRange(c));
+  await pool(need, 4, async (n) => {
+    // Klip ancak o an yaşandıktan sonra oluşturulabilir ve aynı yayından olmalı
+    const cands = (bySlug.get(n.st.streamer.kick) || []).filter((c) => c.livestreamId === n.st.vod.id && c.created >= n.t - 5000);
+    let best = null;
+    for (const c of cands) {
+      const r = await rangeOf(c).catch(() => null);
+      // olay klibin içinde olmalı (2 sn tolerans); birden fazla varsa olaydan önce en çok görüntü veren
+      if (r && n.t >= r.start - 2000 && n.t <= r.end && (!best || r.start < best.range.start)) best = { c, range: r };
+    }
+    if (best) {
+      n.m.clips.set(`${n.st.streamer.kick}|${n.i}`, {
+        id: n.st.vod.id, src: best.c.src, thumb: best.c.thumb || n.st.vod.thumb, start: new Date(best.range.start),
+        end: new Date(best.range.end), clip: true, clipId: best.c.id, title: best.c.title, live: false,
+      });
+    }
+  });
 }
 
 async function loadStreamers(G) {
@@ -187,7 +268,8 @@ async function loadStreamers(G) {
 
 // Demo (sadece PUBG): ilk kayıtlı yayıncının gerçek Kick VOD'u, sahte maçlar
 function demoMatches(vods, streamer) {
-  const v = vods.find((x) => !x.live && x.end - x.start > 3 * 3600_000) || vods[0];
+  const open = vods.filter((x) => !x.locked);
+  const v = open.find((x) => !x.live && x.end - x.start > 3 * 3600_000) || open[0];
   if (!v) return [];
   const names = ['ShroudFan', 'xX_Sniper_Xx', 'kebapci42', 'TurkishPan', 'LootGoblin', 'Ryuuu'];
   const weapons = ['M416', 'Kar98k', 'Beryl M762', 'Mini14', 'UMP45', 'Pan'];
@@ -609,8 +691,12 @@ async function playerPage(G, name) {
       done = 0;
       await pool(hits, 2, async (m) => {
         await G.fetchEvents(m, player);
-        progress(`${G.loadingEvents} ${++done}/${hits.length}`, 55 + (done / Math.max(1, hits.length)) * 45);
+        progress(`${G.loadingEvents} ${++done}/${hits.length}`, 55 + (done / Math.max(1, hits.length)) * 40);
       });
+      if (G.clips && hits.some((m) => m.streams.some((st) => st.vod.locked))) {
+        progress('Abonelere özel yayınlar için klipler aranıyor…', 96);
+        await attachClips(G, hits, player);
+      }
       matches = summaries;
       if (failed.length) setStatus($('pageStatus'), `Yayınları alınamayan kanallar: ${failed.join(', ')}`, true);
     }
@@ -635,20 +721,27 @@ const ROLE_ORDER = ['own', 'enemy', 'other'];
 
 // Sadece yayıncının birebir dahil olduğu anlar: oyuncunun kendi yayını ya da
 // oyuncunun öldürdüğü / oyuncuyu öldüren yayıncının yayını. Maçtaki diğer yayıncılar gösterilmez.
+// Abonelere özel kayıtlarda sadece o anı kapsayan bir klip varsa kart çıkar; yoksa an m.lockedMissed'e sayılır.
 function buildCards(G, m, player) {
   const cards = [];
-  for (const ev of m.events || []) {
+  m.lockedMissed = 0;
+  (m.events || []).forEach((ev, i) => {
     const outgoing = ev.type === 'kill' || ev.type === 'knock';
     for (const st of m.streams) {
       const role = roleOf(G, st, player, ev);
       if (role === 'other') continue;
+      let vod = st.vod;
+      if (vod.locked) {
+        vod = m.clips?.get(`${st.streamer.kick}|${i}`);
+        if (!vod) { m.lockedMissed++; continue; }
+      }
       cards.push({
-        match: m, ev, role, streamer: st.streamer, vod: st.vod,
-        at: (new Date(ev.time) - st.vod.start) / 1000,
+        match: m, ev, role, streamer: st.streamer, vod,
+        at: (new Date(ev.time) - vod.start) / 1000,
         from: outgoing ? player.name : ev.other, to: outgoing ? ev.other : player.name,
       });
     }
-  }
+  });
   return cards.sort((a, b) => a.ev.time.localeCompare(b.ev.time) || ROLE_ORDER.indexOf(a.role) - ROLE_ORDER.indexOf(b.role));
 }
 
@@ -673,6 +766,7 @@ function renderPlayer(G, matches, player, checked) {
     const sameMatch = matches.filter((m) => m.streams?.length).length;
     $('matches').innerHTML = `<div class="empty-box">Son ${checked} maçta bu oyuncunun bir yayıncıyla birebir karşılaşması yok.
       ${sameMatch ? `<br>${sameMatch} maçta yayıncılar vardı ama oyuncuyla doğrudan çatışmadılar.` : ''}
+      ${matches.some((m) => m.lockedMissed) ? `<br>${matches.reduce((n, m) => n + (m.lockedMissed || 0), 0)} an abonelere özel bir yayında kaldı ve o anı kapsayan bir klip yok.` : ''}
       <br>Başka bir oyuncu ara.</div>`;
     return;
   }
@@ -705,7 +799,7 @@ function renderPlayer(G, matches, player, checked) {
           ${G.matchBadge(m)}
           <div class="mh-main"><b>${esc(m.map)}</b> <span class="muted">${esc(m.mode)}</span></div>
           <div class="mh-meta">${fmtDate(created)} · ${timeAgo(created)} · ${Math.round((m.duration || 0) / 60)} dk</div>
-          <div class="mh-streams">${m.streams.filter((st) => m.cards.some((c) => c.streamer.kick === st.streamer.kick)).map((st) => `<button class="chip" data-start="${esc(st.streamer.kick)}" title="Maçın başından izle">${avatarHTML(st.streamer)}${esc(st.streamer.kick)} ▶</button>`).join('')}</div>
+          <div class="mh-streams">${m.streams.filter((st) => !st.vod.locked && m.cards.some((c) => c.streamer.kick === st.streamer.kick)).map((st) => `<button class="chip" data-start="${esc(st.streamer.kick)}" title="Maçın başından izle">${avatarHTML(st.streamer)}${esc(st.streamer.kick)} ▶</button>`).join('')}</div>
         </div>`;
       sec.querySelectorAll('[data-start]').forEach((b) => {
         const st = m.streams.find((x) => x.streamer.kick === b.dataset.start);
@@ -724,6 +818,8 @@ function renderPlayer(G, matches, player, checked) {
     }
     const off = matches.length - inStream.length;
     if (off) root.insertAdjacentHTML('beforeend', `<div class="muted small offline">${off} maçta bir yayıncıyla birebir etkileşim yok.</div>`);
+    const missed = matches.reduce((n, m) => n + (m.lockedMissed || 0), 0);
+    if (missed) root.insertAdjacentHTML('beforeend', `<div class="muted small offline">${missed} an abonelere özel bir yayında kaldı ve o anı kapsayan bir klip bulunamadı.</div>`);
     hydrateAvatars(root);
   }
   draw();
@@ -737,6 +833,7 @@ function cardEl(c, onClick) {
   b.innerHTML = `
     <div class="thumb" ${thumb}>
       <span class="role-badge ${c.role}">${ROLE_LABEL[c.role]}</span>
+      ${c.vod.clip ? '<span class="clip-badge" title="Yayın kaydı abonelere özel; bu an bir klipten">Klip</span>' : ''}
       <span class="ts">${fmtClock(c.at)}</span>
       <span class="play">▶</span>
     </div>
@@ -837,11 +934,11 @@ async function playCurrent() {
   $('modalTitle').innerHTML = c.ev.type === 'start'
     ? `<b>${esc(slug)}</b> · ${esc(c.match.map)} maç başı`
     : `<span class="tag ${c.ev.type}">${LABELS[c.ev.type]}</span> <b>${esc(c.from)}</b> → <b>${esc(c.to)}</b>`;
-  $('modalInfo').innerHTML = `<span class="role-badge ${c.role}">${ROLE_LABEL[c.role]}</span> ${esc(slug)} · ${esc(c.ev.weapon)}${c.ev.distance ? ' · ' + c.ev.distance + ' m' : ''} · ${fmtClock(t)}
+  $('modalInfo').innerHTML = `<span class="role-badge ${c.role}">${ROLE_LABEL[c.role]}</span>${c.vod.clip ? ' <span class="clip-badge">Klip</span>' : ''} ${esc(slug)} · ${esc(c.ev.weapon)}${c.ev.distance ? ' · ' + c.ev.distance + ' m' : ''} · ${fmtClock(t)}
     <span class="muted">(${modalIndex + 1}/${modalList.length})</span>`;
   $('prevBtn').disabled = modalIndex <= 0;
   $('nextBtn').disabled = modalIndex >= modalList.length - 1;
-  $('kickLink').href = c.vod.uuid ? `https://kick.com/${encodeURIComponent(slug)}/videos/${c.vod.uuid}` : `https://kick.com/${encodeURIComponent(slug)}`;
+  $('kickLink').href = c.vod.clip ? `https://kick.com/${encodeURIComponent(slug)}/clips/${encodeURIComponent(c.vod.clipId)}` : c.vod.uuid ? `https://kick.com/${encodeURIComponent(slug)}/videos/${c.vod.uuid}` : `https://kick.com/${encodeURIComponent(slug)}`;
 
   const video = $('video');
   if (currentSrc === c.vod.src) {

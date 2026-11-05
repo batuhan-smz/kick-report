@@ -1,9 +1,9 @@
-// Otomatik yayıncı bulma
-// 1. Kick'te şu an PUBG kategorisinde yayın yapan kanalları düzenli tara (aday kanallar).
-// 2. Her aday için Kick kullanıcı adını / kanal adını PUBG'de ara (tek istekte 10 isim).
-// 3. Aynı adlı PUBG hesabının yayın başladıktan sonra oynanmış bir maçı varsa eşleşme doğrulanmış sayılır
+// Otomatik yayıncı bulma (oyundan bağımsız; varsayılanlar PUBG içindir)
+// 1. Kick'te şu an oyunun kategorisinde yayın yapan kanalları düzenli tara (aday kanallar).
+// 2. Her aday için Kick kullanıcı adından türetilen oyun içi adları dene (PUBG: tek istekte 10 isim).
+// 3. Bulunan hesabın yayın başladıktan sonra oynanmış bir maçı varsa eşleşme doğrulanmış sayılır
 //    ve yayıncı kaydına "auto" olarak eklenir.
-// PUBG oyuncu araması dakikada sınırlı olduğu için kullanıcı aramalarına her zaman pay bırakılır.
+// Oyun API'leri dakikada sınırlı olduğu için kullanıcı aramalarına her zaman pay bırakılır.
 
 const VALID_NAME = /^[A-Za-z0-9_-]{3,16}$/;
 const MINUTE = 60_000;
@@ -35,9 +35,26 @@ function createDiscovery(opts) {
     log: (...a) => console.log('[keşif]', ...a),
     ...opts,
   };
-  // Gerekli: o.store ({get,set}), o.pubgPlayers(names) -> [{name, id, matchIds}], o.matchCreatedAt(id) -> ms,
-  //          o.isMapped(slug), o.addStreamer(entry) (async olabilir), o.lookupsLastMinute()
-  // İsteğe bağlı: o.liveTtlMs — son taramadan bu kadar süre sonra "canlı" bilgisi bayat sayılır
+  // Gerekli: o.store ({get,set}), o.isMapped(slug), o.addStreamer(entry) (async olabilir), o.lookupsLastMinute()
+  // ve sorgulama:
+  //   PUBG (varsayılan): o.pubgPlayers(names) -> [{name, id, matchIds}], o.matchCreatedAt(id) -> ms
+  //   Diğer oyunlar:     o.lookupNames(names) -> [{query, name, ...}], o.hasMatchSince(player, startMs, now) -> bool,
+  //                      o.candidateNames(username, slug, language) -> [ad], o.makeEntry(candidate, player, now)
+  // İsteğe bağlı: o.storeKey (depo anahtarı), o.batchSize (tek istekteki isim sayısı),
+  //               o.liveTtlMs — son taramadan bu kadar süre sonra "canlı" bilgisi bayat sayılır
+  o.storeKey = o.storeKey || 'discovery';
+  o.batchSize = o.batchSize || 10;
+  o.candidateNames = o.candidateNames || ((username, slug) => candidateNames(username, slug));
+  o.lookupNames = o.lookupNames || o.pubgPlayers;
+  o.hasMatchSince = o.hasMatchSince || (async (player, start, now) => {
+    for (const id of (player.matchIds || []).slice(0, 5)) {
+      let t;
+      try { t = await o.matchCreatedAt(id); } catch { continue; }
+      if (t >= start - 2 * MINUTE && t <= now + MINUTE) return true;
+    }
+    return false;
+  });
+  o.makeEntry = o.makeEntry || ((c, player, now) => ({ pubgName: player.name, shard: 'steam', kick: c.slug, source: 'auto', avatar: c.avatar || null, verifiedAt: new Date(now).toISOString() }));
 
   let state = { candidates: {}, live: {}, lastScan: 0, lastError: null };
   let live = new Map(); // slug -> { start, viewers } (son taramada canlı olanlar)
@@ -49,7 +66,7 @@ function createDiscovery(opts) {
   // Durum kalıcı depoda tutulur; sunucusuz ortamda her istek ayrı örnekte çalışabileceği için
   // "şu an canlı" bilgisi de kaydedilir.
   async function load() {
-    const s = await o.store.get('discovery', null);
+    const s = await o.store.get(o.storeKey, null);
     state = { candidates: s?.candidates || {}, live: s?.live || {}, lastScan: s?.lastScan || 0, lastScanCount: s?.lastScanCount || 0, lastError: s?.lastError || null };
     const fresh = Date.now() - state.lastScan < (o.liveTtlMs || 2 * o.scanEveryMs);
     live = new Map(fresh ? Object.entries(state.live) : []);
@@ -60,7 +77,7 @@ function createDiscovery(opts) {
   }
   async function save() {
     state.live = Object.fromEntries([...live].map(([slug, l]) => [slug, { start: l.start, viewers: l.viewers }]));
-    await o.store.set('discovery', state);
+    await o.store.set(o.storeKey, state);
   }
 
   // --- 1. Kick taraması ---
@@ -92,7 +109,7 @@ function createDiscovery(opts) {
       c.language = l.language;
       c.lastSeen = now;
       c.lastStart = l.start;
-      c.names = candidateNames(l.username, slug);
+      c.names = o.candidateNames(l.username, slug, l.language);
     }
     state.lastScan = now;
     state.lastScanCount = seen.size;
@@ -117,17 +134,15 @@ function createDiscovery(opts) {
 
   async function verify(c, player, now) {
     const start = live.get(c.slug)?.start ?? c.lastStart;
-    for (const id of (player.matchIds || []).slice(0, 5)) {
-      let t;
-      try { t = await o.matchCreatedAt(id); } catch { continue; }
-      if (t >= start - 2 * MINUTE && t <= now + MINUTE) {
-        c.status = 'linked';
-        c.pubgName = player.name;
-        c.linkedAt = now;
-        await o.addStreamer({ pubgName: player.name, shard: 'steam', kick: c.slug, source: 'auto', avatar: c.avatar || null, verifiedAt: new Date(now).toISOString() });
-        o.log(`eşleşti: kick.com/${c.slug} -> ${player.name}`);
-        return;
-      }
+    let ok = false;
+    try { ok = await o.hasMatchSince(player, start, now); } catch (e) { if (e.status === 429) throw e; }
+    if (ok) {
+      c.status = 'linked';
+      c.pubgName = player.name; // bulunan oyun içi ad (PUBG adı ya da Riot ID)
+      c.linkedAt = now;
+      await o.addStreamer(o.makeEntry(c, player, now));
+      o.log(`eşleşti: kick.com/${c.slug} -> ${player.name}`);
+      return;
     }
     // Yayın sırasında maç yok: yayın yeni başladıysa sonra tekrar bak, uzun süredir sürüyorsa vazgeç
     c.pubgName = player.name;
@@ -149,9 +164,9 @@ function createDiscovery(opts) {
     while (pending.length) {
       const budget = o.rpm - o.reserve - o.lookupsLastMinute();
       if (budget <= 0) return;
-      // 10 isimlik bir paket hazırla (her adaydan bir isim)
+      // paket hazırla (her adaydan bir isim; PUBG'de 10, Riot'ta 1)
       const batch = [];
-      while (pending.length && batch.length < 10) {
+      while (pending.length && batch.length < o.batchSize) {
         const c = pending.shift();
         const name = nextName(c);
         if (!name) { c.status = 'notfound'; c.retryAt = now + o.retryNotFoundMs; continue; }
@@ -161,14 +176,15 @@ function createDiscovery(opts) {
 
       let players;
       try {
-        players = await o.pubgPlayers(batch.map((b) => b.name));
+        players = await o.lookupNames(batch.map((b) => b.name));
       } catch (e) {
-        if (e.status === 429) { pauseUntil = Date.now() + MINUTE; o.log('PUBG limiti doldu, 1 dk bekleniyor'); }
+        if (e.status === 429) { pauseUntil = Date.now() + MINUTE; o.log('API limiti doldu, 1 dk bekleniyor'); }
         else if (e.status === 400) batch.forEach((b) => { b.c.tried.push(b.name); }); // geçersiz isim içeren paket
-        else { state.lastError = e.message; o.log('PUBG hatası:', e.message); }
+        else { state.lastError = e.message; o.log('API hatası:', e.message); }
         return;
       }
-      const byName = new Map(players.map((p) => [p.name, p]));
+      // PUBG: dönen ad sorulan adla birebir aynı; Riot: dönen kayıt hangi sorguya ait olduğunu söyler
+      const byName = new Map(players.map((p) => [p.query ?? p.name, p]));
       for (const { c, name } of batch) {
         const p = byName.get(name);
         if (!p) {
@@ -178,7 +194,12 @@ function createDiscovery(opts) {
           else pending.push(c); // sıradaki isimle tekrar dene
           continue;
         }
-        await verify(c, p, Date.now());
+        try {
+          await verify(c, p, Date.now());
+        } catch (e) {
+          if (e.status === 429) { pauseUntil = Date.now() + MINUTE; o.log('API limiti doldu, 1 dk bekleniyor'); return; }
+          throw e;
+        }
       }
     }
   }

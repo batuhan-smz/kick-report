@@ -15,7 +15,7 @@ Site Vercel'de, `main` dalına her `git push` sonrası otomatik yayınlanır.
 | Yayıncı listesi, keşif durumu | Özel Vercel Blob deposu `kick-report-data` (`store.js`) |
 | Otomatik bulma | GitHub Actions her 30 dk `/api/cron/discovery` çağırır (`.github/workflows/discovery.yml`) |
 
-Vercel ortam değişkenleri (Production): `PUBG_API_KEY`, `ADMIN_PASSWORD`, `CRON_SECRET`, `TWA_SHA256`, `BLOB_READ_WRITE_TOKEN` (Blob deposu bağlanınca otomatik). GitHub Actions ayarları: secret `CRON_SECRET` (Vercel'dekiyle aynı), variable `SITE_URL`. Örnek: `.env.example`.
+Vercel ortam değişkenleri (Production): `PUBG_API_KEY`, `RIOT_API_KEY`, `ADMIN_PASSWORD`, `CRON_SECRET`, `TWA_SHA256`, `BLOB_READ_WRITE_TOKEN` (Blob deposu bağlanınca otomatik). GitHub Actions ayarları: secret `CRON_SECRET` (Vercel'dekiyle aynı), variable `SITE_URL`. Örnek: `.env.example`.
 
 Başka bir kurulumdan (ör. yerel `data/` klasörü) veri taşımak için yönetici olarak `POST /api/admin/import` uç noktasına `{ "streamers": [...], "discovery": {...} }` gönder.
 
@@ -78,6 +78,16 @@ Ayarlar (ortam değişkenleri):
 7. Videodaki saniye, kaydın segment listesindeki gerçek saatlerden (`#EXT-X-PROGRAM-DATE-TIME`) hesaplanır. Kick kayıtları bildirilen başlangıçtan birkaç saniye önce başlayabiliyor ve yayın koptuğunda arada video olmuyor. Bu yüzden basit "olay saati − yayın başlangıcı" hesabı kopmalı kayıtlarda onlarca saniye geç kalır. Liste okunamazsa yedek olarak bu basit hesap kullanılır.
 
 Video ile oyun saati arasında birkaç saniyelik kayma olursa video penceresindeki **Senkron düzeltme** alanını kullan.
+
+## League of Legends
+
+Menüdeki **LoL** sekmesi aynı yapıyı League of Legends için sunar: `/lol` ana sayfa, `/lol/players/Ad%23TAG` oyuncu sayfası.
+
+- **Oyuncu:** Riot ID ile aranır (`Ad#TAG`; etiket yazılmazsa `#TR1`). Hesap `account-v1`, maçlar `match-v5` ile alınır. Oyuncunun maçlarının hangi bölgede olduğu (europe / americas / asia / sea) etiketten tahmin edilir, bulunamazsa sırayla denenir.
+- **Anlar:** maç zaman çizelgesindeki `CHAMPION_KILL` olayları: oyuncunun öldürdükleri ve öldüğü anlar. Saat = `gameStartTimestamp` + olay zamanı; videodaki konum PUBG'deki gibi kayıt saatlerinden hesaplanır.
+- **Yayıncılar:** ayrı bir listede (`lol-streamers`), Riot ID değişse de bozulmasın diye **puuid** ile tutulur. Yönetici sayfasında **LoL** sekmesinden Riot ID + Kick kanalıyla elle eklenir.
+- **Otomatik bulma:** Kick'in `league-of-legends` kategorisindeki canlı yayınlar taranır; Kick kullanıcı adı, yayın diline göre tahmin edilen etiketlerle denenir (Türkçe → `TR1`, Portekizce → `BR1`, İspanyolca → `LAN/LAS/EUW`, İngilizce → `EUW/NA1` …). Hesap bulunur ve yayın başladıktan sonra oynanmış bir maçı varsa eşleşme eklenir. LoL'de oyun içi ad ile kanal adı sık farklı olduğu için eşleşme oranı PUBG'den düşüktür; bulunamayanlar yönetici sayfasında elle eşleştirilir.
+- **Anahtar:** `RIOT_API_KEY` ortam değişkeni. Yoksa LoL sayfaları "RIOT_API_KEY tanımlı değil" der, otomatik bulma çalışmaz. Geliştirici anahtarı 24 saatte bir sona erer ve 2 dakikada 100 istekle sınırlıdır; sürekli yayın için developer.riotgames.com'dan **Personal API Key** başvurusu yap. Otomatik bulma dakikada en fazla 30 Riot isteği kullanır, 10'unu kullanıcılara bırakır (`RIOT_RPM`, `RIOT_RESERVE`).
 
 ## Android uygulaması (TWA)
 

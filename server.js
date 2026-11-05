@@ -11,6 +11,7 @@ const zlib = require('zlib');
 const crypto = require('crypto');
 const { createDiscovery } = require('./discovery');
 const { createStore } = require('./store');
+const { createLol, extractLolEvents, lolSummary, candidateRiotIds } = require('./lol');
 
 // .env dosyası (yerel geliştirme): ANAHTAR=değer satırları; zaten tanımlı ortam değişkenlerini ezmez
 (function loadDotEnv() {
@@ -29,6 +30,9 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const SHARDS = new Set(['steam', 'kakao', 'console', 'psn', 'xbox', 'stadia']);
 const STREAMERS_FILE = process.env.STREAMERS_FILE || path.join(__dirname, 'data', 'streamers.json');
 const DISCOVERY_FILE = process.env.DISCOVERY_FILE || path.join(__dirname, 'data', 'discovery.json');
+const LOL_STREAMERS_FILE = process.env.LOL_STREAMERS_FILE || path.join(__dirname, 'data', 'lol-streamers.json');
+const LOL_DISCOVERY_FILE = process.env.LOL_DISCOVERY_FILE || path.join(__dirname, 'data', 'lol-discovery.json');
+const RIOT_API_KEY = process.env.RIOT_API_KEY || '';
 const PUBG_RPM = Number(process.env.PUBG_RPM || 10); // PUBG anahtarının dakikalık oyuncu araması limiti
 const ADMIN_PASSWORD_FILE = process.env.ADMIN_PASSWORD_FILE || path.join(__dirname, 'data', 'admin-password.txt');
 
@@ -94,34 +98,54 @@ function recentFails(ip) {
 }
 
 // --- kalıcı depolama: yerelde data/ klasörü, Vercel'de özel Blob deposu ---
-const store = createStore({ streamers: STREAMERS_FILE, discovery: DISCOVERY_FILE });
+const store = createStore({
+  streamers: STREAMERS_FILE, discovery: DISCOVERY_FILE,
+  'lol-streamers': LOL_STREAMERS_FILE, 'lol-discovery': LOL_DISCOVERY_FILE,
+});
 // Sunucusuz ortamda birden çok örnek aynı veriyi yazabilir: kısa aralıklarla depodan tazele,
 // yazmadan hemen önce son hâli oku. Yerelde tek yazan bu süreç olduğu için bellek yeterli.
 const SERVERLESS = store.kind === 'blob';
 const READ_TTL = SERVERLESS ? 15_000 : Infinity;
 const FRESH = SERVERLESS ? 0 : Infinity;
 
-// --- yayıncı kaydı: PUBG adı -> Kick kanalı ---
+// --- yayıncı kayıtları: oyun içi hesap -> Kick kanalı (her oyun için ayrı liste) ---
+// PUBG: { pubgName, shard, kick, ... }   LoL: { riotId, puuid, kick, ... }
 // source: 'manual' (elle eklenen) ya da 'auto' (otomatik bulunan)
-let streamers = [];
-let streamersLoadedAt = 0;
-async function loadStreamers(maxAgeMs = READ_TTL) {
-  if (streamersLoadedAt && Date.now() - streamersLoadedAt < maxAgeMs) return;
-  const list = await store.get('streamers', []);
-  streamers = Array.isArray(list) ? list : [];
-  streamersLoadedAt = Date.now();
+function createRegistry(storeKey, idOf) {
+  const r = { list: [], loadedAt: 0, idOf };
+  r.load = async (maxAgeMs = READ_TTL) => {
+    if (r.loadedAt && Date.now() - r.loadedAt < maxAgeMs) return;
+    const list = await store.get(storeKey, []);
+    r.list = Array.isArray(list) ? list : [];
+    r.loadedAt = Date.now();
+  };
+  r.save = () => store.set(storeKey, r.list);
+  r.upsert = async (entry) => {
+    await r.load(FRESH);
+    const id = idOf(entry);
+    // Elle eklenen kayıt, aynı kanal için otomatik bulunanın yerine geçer
+    r.list = r.list.filter((s) => idOf(s) !== id && !(entry.source === 'manual' && s.source === 'auto' && s.kick === entry.kick));
+    r.list.push(entry);
+    await r.save();
+  };
+  r.remove = async (id) => {
+    await r.load(FRESH);
+    const gone = r.list.filter((s) => idOf(s) === id);
+    r.list = r.list.filter((s) => idOf(s) !== id);
+    await r.save();
+    return gone;
+  };
+  r.merge = async (entries) => { // içe aktarma: aynı kimlikte gelen kayıt geçerli olur
+    await r.load(FRESH);
+    const incoming = new Set(entries.map(idOf));
+    r.list = r.list.filter((s) => !incoming.has(idOf(s))).concat(entries);
+    await r.save();
+  };
+  return r;
 }
-async function saveStreamers() {
-  await store.set('streamers', streamers);
-}
-async function upsertStreamer(entry) {
-  await loadStreamers(FRESH);
-  const key = entry.pubgName.toLowerCase();
-  // Elle eklenen kayıt, aynı kanal için otomatik bulunanın yerine geçer
-  streamers = streamers.filter((s) => s.pubgName.toLowerCase() !== key && !(entry.source === 'manual' && s.source === 'auto' && s.kick === entry.kick));
-  streamers.push(entry);
-  await saveStreamers();
-}
+const pubgReg = createRegistry('streamers', (s) => String(s.pubgName).toLowerCase());
+const lolReg = createRegistry('lol-streamers', (s) => s.puuid);
+const loadStreamers = (maxAgeMs) => pubgReg.load(maxAgeMs);
 function readBody(req, limit = 10_000) {
   return new Promise((resolve, reject) => {
     let raw = '';
@@ -136,7 +160,12 @@ function streamersIn(match) {
   const names = new Set((match.included || [])
     .filter((x) => x.type === 'participant')
     .map((x) => (x.attributes?.stats?.name || '').toLowerCase()));
-  return streamers.filter((s) => names.has(s.pubgName.toLowerCase()));
+  return pubgReg.list.filter((s) => names.has(s.pubgName.toLowerCase()));
+}
+// LoL: maçtaki kayıtlı yayıncılar puuid ile bulunur (Riot ID değişse de eşleşme bozulmaz)
+function lolStreamersIn(match) {
+  const ids = new Set(match.metadata?.participants || (match.info?.participants || []).map((p) => p.puuid));
+  return lolReg.list.filter((s) => ids.has(s.puuid));
 }
 
 // --- basit bellek içi önbellek (maç ve telemetri verisi değişmez) ---
@@ -221,12 +250,19 @@ async function handleApi(req, url, res) {
     const secret = process.env.CRON_SECRET;
     const auth = String(req.headers.authorization || '');
     if (!secret || !safeEqual(auth, 'Bearer ' + secret)) throw httpError(401, 'Yetkisiz');
-    if (!discovery) throw httpError(503, 'Otomatik bulma kapalı (PUBG_API_KEY yok ya da DISCOVERY=0).');
-    await loadStreamers(FRESH);
+    if (!discovery && !lolDiscovery) throw httpError(503, 'Otomatik bulma kapalı (API anahtarı yok ya da DISCOVERY=0).');
     const started = Date.now();
-    await discovery.tick({ reload: true });
-    const st = await discovery.status();
-    return { ok: true, ms: Date.now() - started, liveNow: st.liveNow, totals: st.totals, lastError: st.lastError };
+    const out = { ok: true };
+    for (const [name, d, reg] of [['pubg', discovery, pubgReg], ['lol', lolDiscovery, lolReg]]) {
+      if (!d) continue;
+      await reg.load(FRESH);
+      await d.tick({ reload: true });
+      const st = await d.status();
+      out[name] = { liveNow: st.liveNow, totals: st.totals, lastError: st.lastError };
+    }
+    if (out.pubg) Object.assign(out, out.pubg); // PUBG alanları üst düzeyde de (eski çağıranlar için)
+    out.ms = Date.now() - started;
+    return out;
   }
 
   // GET  /api/admin/me      -> { admin: true|false }
@@ -257,18 +293,24 @@ async function handleApi(req, url, res) {
       const b = await readBody(req, 5_000_000);
       let added = 0;
       if (Array.isArray(b.streamers)) {
-        await loadStreamers(FRESH);
-        const valid = b.streamers.filter((s) => s && typeof s.pubgName === 'string' && typeof s.kick === 'string' && SHARDS.has(s.shard || 'steam'));
-        const incoming = new Set(valid.map((s) => s.pubgName.toLowerCase()));
-        streamers = streamers.filter((s) => !incoming.has(s.pubgName.toLowerCase())).concat(valid);
+        const valid = b.streamers.filter((x) => x && typeof x.pubgName === 'string' && typeof x.kick === 'string' && SHARDS.has(x.shard || 'steam'));
+        await pubgReg.merge(valid);
         added = valid.length;
-        await saveStreamers();
+      }
+      if (Array.isArray(b.lolStreamers)) {
+        const valid = b.lolStreamers.filter((x) => x && typeof x.puuid === 'string' && typeof x.riotId === 'string' && typeof x.kick === 'string');
+        await lolReg.merge(valid);
+        added += valid.length;
       }
       if (b.discovery && typeof b.discovery === 'object' && b.discovery.candidates) {
         await store.set('discovery', b.discovery);
         if (discovery) await discovery.ensureLoaded(0);
       }
-      return { ok: true, streamers: streamers.length, imported: added, discovery: !!b.discovery };
+      if (b.lolDiscovery && typeof b.lolDiscovery === 'object' && b.lolDiscovery.candidates) {
+        await store.set('lol-discovery', b.lolDiscovery);
+        if (lolDiscovery) await lolDiscovery.ensureLoaded(0);
+      }
+      return { ok: true, streamers: pubgReg.list.length, lolStreamers: lolReg.list.length, imported: added, discovery: !!b.discovery };
     }
     throw httpError(404, 'Bilinmeyen uç nokta');
   }
@@ -280,7 +322,7 @@ async function handleApi(req, url, res) {
     // live: şu an Kick'te PUBG yayını açık mı (son taramaya göre)
     if (req.method === 'GET' && !parts[2]) {
       if (discovery) await discovery.ensureLoaded(SERVERLESS ? 60_000 : Infinity).catch(() => {});
-      return streamers.map((s) => ({ ...s, live: discovery ? discovery.isLive(s.kick) : false }));
+      return pubgReg.list.map((x) => ({ ...x, live: discovery ? discovery.isLive(x.kick) : false }));
     }
     requireAdmin(req);
     if (req.method === 'POST' && !parts[2]) {
@@ -297,20 +339,78 @@ async function handleApi(req, url, res) {
       const p = data.data?.[0];
       if (!p) throw httpError(404, 'PUBG oyuncusu bulunamadı');
       const entry = { pubgName: p.attributes.name, shard, kick, source: 'manual' };
-      await upsertStreamer(entry);
+      await pubgReg.upsert(entry);
       return entry;
     }
     if (req.method === 'DELETE' && parts[2]) {
-      const n = decodeURIComponent(parts[2]).toLowerCase();
-      await loadStreamers(FRESH);
-      const gone = streamers.filter((s) => s.pubgName.toLowerCase() === n);
-      streamers = streamers.filter((s) => s.pubgName.toLowerCase() !== n);
-      await saveStreamers();
+      const gone = await pubgReg.remove(decodeURIComponent(parts[2]).toLowerCase());
       // silinen otomatik eşleşme bir sonraki taramada geri eklenmesin
-      for (const s of gone.filter((x) => x.source === 'auto')) await discovery?.reject(s.kick);
+      for (const x of gone.filter((y) => y.source === 'auto')) await discovery?.reject(x.kick);
       return { ok: true };
     }
     throw httpError(405, 'Desteklenmeyen istek');
+  }
+
+  // ---------- League of Legends ----------
+  if (parts[1] === 'lol') {
+    await lolReg.load();
+    // GET    /api/lol/streamers          -> kayıtlı LoL yayıncıları (herkese açık)
+    // POST   /api/lol/streamers          -> { riotId: "Ad#TAG", kick }   (yönetici)
+    // DELETE /api/lol/streamers/:puuid   -> kaydı sil                     (yönetici)
+    if (parts[2] === 'streamers') {
+      if (req.method === 'GET' && !parts[3]) {
+        if (lolDiscovery) await lolDiscovery.ensureLoaded(SERVERLESS ? 60_000 : Infinity).catch(() => {});
+        return lolReg.list.map((x) => ({ ...x, live: lolDiscovery ? lolDiscovery.isLive(x.kick) : false }));
+      }
+      requireAdmin(req);
+      if (req.method === 'POST' && !parts[3]) {
+        const b = await readBody(req);
+        const kick = String(b.kick || '').trim().toLowerCase();
+        if (!/^[a-z0-9_-]{2,40}$/.test(kick)) throw httpError(400, 'Geçersiz Kick kanal adı');
+        const acc = await lol.account(String(b.riotId || '')).catch((e) => { throw e.status === 404 ? httpError(404, 'Riot hesabı bulunamadı') : e; });
+        const entry = { riotId: `${acc.gameName}#${acc.tagLine}`, puuid: acc.puuid, kick, source: 'manual' };
+        await lolReg.upsert(entry);
+        return entry;
+      }
+      if (req.method === 'DELETE' && parts[3]) {
+        const gone = await lolReg.remove(decodeURIComponent(parts[3]));
+        for (const x of gone.filter((y) => y.source === 'auto')) await lolDiscovery?.reject(x.kick);
+        return { ok: true };
+      }
+      throw httpError(405, 'Desteklenmeyen istek');
+    }
+    // GET /api/lol/discovery -> LoL otomatik bulma durumu (yönetici)
+    if (parts[2] === 'discovery' && req.method === 'GET') {
+      requireAdmin(req);
+      if (!lolDiscovery) return { enabled: false };
+      return { enabled: true, ...(await lolDiscovery.status(FRESH)) };
+    }
+    // GET /api/lol/player/:riotId -> { name, puuid, matchIds }
+    if (parts[2] === 'player' && parts[3]) {
+      const acc = await lol.account(decodeURIComponent(parts[3])).catch((e) => { throw e.status === 404 ? httpError(404, 'Oyuncu bulunamadı (Riot ID: Ad#TAG).') : e; });
+      const matchIds = await lol.matchIds(acc.puuid, acc.tagLine);
+      return { name: `${acc.gameName}#${acc.tagLine}`, puuid: acc.puuid, matchIds };
+    }
+    // GET /api/lol/match/:id              -> maç özeti + maçtaki kayıtlı yayıncılar
+    // GET /api/lol/match/:id/events?puuid -> oyuncunun öldürme / ölüm olayları
+    if (parts[2] === 'match' && parts[3]) {
+      const id = parts[3].replace(/[^A-Za-z0-9_]/g, '');
+      const m = await lol.match(id);
+      const summary = { ...lolSummary(id, m), streamers: lolStreamersIn(m) };
+      if (parts[4] !== 'events') return summary;
+      const puuid = url.searchParams.get('puuid');
+      if (!puuid) throw httpError(400, 'puuid parametresi gerekli');
+      const me = (m.info.participants || []).find((p) => p.puuid === puuid);
+      const tl = await lol.timeline(id);
+      return {
+        ...summary,
+        result: me ? (me.win ? 'win' : 'loss') : null,
+        champion: me?.championName || null,
+        kda: me ? `${me.kills}/${me.deaths}/${me.assists}` : null,
+        events: extractLolEvents(m, tl, puuid),
+      };
+    }
+    throw httpError(404, 'Bilinmeyen uç nokta');
   }
 
   // GET /api/discovery -> otomatik bulma durumu (yönetici)
@@ -424,7 +524,8 @@ async function handler(req, res) {
   if (!file.startsWith(PUBLIC_DIR)) { res.writeHead(403); return res.end(); }
   fs.readFile(file, (err, data) => {
     // /players/steam/Ad, /streamers gibi uzantısız adresler tek sayfalık uygulamaya gider
-    if (err && !path.extname(file)) {
+    // (Riot ID'lerde nokta olabildiği için /players ve /lol altındaki her adres uygulamaya gider)
+    if (err && (!path.extname(file) || /^\/(players|lol|streamers)(\/|$)/.test(url.pathname))) {
       return fs.readFile(path.join(PUBLIC_DIR, 'index.html'), (e2, html) => {
         if (e2) { res.writeHead(500); return res.end(); }
         res.writeHead(200, { 'Content-Type': TYPES['.html'], 'Cache-Control': 'no-cache' });
@@ -449,10 +550,10 @@ const discovery = API_KEY && process.env.DISCOVERY !== '0' ? createDiscovery({
   reserve: Number(process.env.DISCOVERY_RESERVE || 4),
   maxPages: Number(process.env.DISCOVERY_MAX_PAGES || 10),
   lookupsLastMinute,
-  isMapped: (slug) => streamers.some((s) => s.kick === slug),
+  isMapped: (slug) => pubgReg.list.some((x) => x.kick === slug),
   addStreamer: async (entry) => {
-    await loadStreamers(FRESH);
-    if (!streamers.some((s) => s.kick === entry.kick)) await upsertStreamer(entry);
+    await pubgReg.load(FRESH);
+    if (!pubgReg.list.some((x) => x.kick === entry.kick)) await pubgReg.upsert(entry);
   },
   matchCreatedAt: async (id) => {
     const m = await cached(`m:steam:${id}`, 24 * 3600_000, () => pubg(`/shards/steam/matches/${id}`));
@@ -469,6 +570,40 @@ const discovery = API_KEY && process.env.DISCOVERY !== '0' ? createDiscovery({
   },
 }) : null;
 
+// --- League of Legends: Riot API ve otomatik bulma (RIOT_API_KEY yoksa kapalı) ---
+const lol = createLol({ apiKey: RIOT_API_KEY, base: process.env.RIOT_API_BASE, cached, httpError });
+const lolDiscovery = RIOT_API_KEY && process.env.DISCOVERY !== '0' ? createDiscovery({
+  store,
+  storeKey: 'lol-discovery',
+  category: 'league-of-legends',
+  liveTtlMs: SERVERLESS ? 40 * 60_000 : undefined,
+  kickBase: process.env.KICK_BASE || 'https://kick.com',
+  maxPages: Number(process.env.DISCOVERY_MAX_PAGES || 10),
+  // Riot geliştirici anahtarı: 2 dakikada 100 istek. Dakikada en fazla 30, bunun 10'u kullanıcılara kalır.
+  rpm: Number(process.env.RIOT_RPM || 30),
+  reserve: Number(process.env.RIOT_RESERVE || 10),
+  batchSize: 1,
+  lookupsLastMinute: lol.callsLastMinute,
+  candidateNames: candidateRiotIds,
+  lookupNames: async ([riotId]) => {
+    try {
+      const acc = await lol.account(riotId);
+      return [{ query: riotId, name: `${acc.gameName}#${acc.tagLine}`, puuid: acc.puuid, tagLine: acc.tagLine }];
+    } catch (e) {
+      if (e.status === 404) return [];
+      throw e;
+    }
+  },
+  hasMatchSince: async (player, start) => (await lol.matchIds(player.puuid, player.tagLine, { startTime: start - 2 * 60_000, count: 5 })).length > 0,
+  makeEntry: (c, player, now) => ({ riotId: player.name, puuid: player.puuid, kick: c.slug, source: 'auto', avatar: c.avatar || null, verifiedAt: new Date(now).toISOString() }),
+  isMapped: (slug) => lolReg.list.some((x) => x.kick === slug),
+  addStreamer: async (entry) => {
+    await lolReg.load(FRESH);
+    if (!lolReg.list.some((x) => x.kick === entry.kick)) await lolReg.upsert(entry);
+  },
+  log: (...a) => console.log('[keşif:lol]', ...a),
+}) : null;
+
 if (require.main === module) {
   server.listen(PORT, () => {
     console.log(`Kick Report çalışıyor: http://localhost:${PORT}`);
@@ -478,9 +613,11 @@ if (require.main === module) {
     if (!API_KEY) console.log('Uyarı: PUBG_API_KEY yok. Sadece demo modu çalışır: http://localhost:' + PORT + '/?demo=1');
     if (discovery) {
       console.log('Otomatik yayıncı bulma açık (kapatmak için DISCOVERY=0).');
-      loadStreamers().then(() => discovery.start());
+      pubgReg.load().then(() => discovery.start());
     }
+    if (lolDiscovery) lolReg.load().then(() => lolDiscovery.start());
+    else console.log('LoL kapalı: RIOT_API_KEY tanımlı değil.');
   });
 }
 
-module.exports = { extractEvents, server, handler, discovery, loadStreamers };
+module.exports = { extractEvents, server, handler, discovery, lolDiscovery, loadStreamers, loadLolStreamers: (a) => lolReg.load(a) };

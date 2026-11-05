@@ -1,10 +1,11 @@
 // Kick Report — istemci (tek sayfalık uygulama)
-// Sayfalar:  /                         ana sayfa: arama + kayıtlı yayıncılar
-//            /players/:shard/:name     oyuncunun yayınlarda görünen anları
-//            /streamers                yayıncı kaydı
-// Akış: oyuncunun PUBG maçları (sunucu) -> her maçta oynayan kayıtlı yayıncılar (sunucu)
+// Sayfalar:  /                       PUBG ana sayfa      /lol                  LoL ana sayfa
+//            /players/steam/:ad      PUBG oyuncusu       /lol/players/:riotId  LoL oyuncusu (Ad#TAG)
+//            /streamers              yayıncı kaydı (yönetici, menüde yok)
+// Akış: oyuncunun maçları (sunucu) -> her maçta oynayan kayıtlı yayıncılar (sunucu)
 //       -> o yayıncıların Kick VOD listeleri (doğrudan tarayıcı) -> maçı VOD ile zaman üzerinden eşleştir
-//       -> eşleşen maçların telemetri olaylarını çek -> her (olay × yayın) bir video kartı.
+//       -> eşleşen maçların öldürme olaylarını çek -> her (olay × yayın) bir video kartı.
+// Oyuna özel her şey aşağıdaki GAMES yapılandırmasında; geri kalan kod iki oyunda ortak.
 
 const $ = (id) => document.getElementById(id);
 const query = new URLSearchParams(location.search);
@@ -17,12 +18,12 @@ const MATCH_GRACE_MS = 60_000; // VOD sınırlarında küçük tolerans
 
 let hls = null;
 let currentSrc = null;
-let streamers = [];
 let modalList = [];   // modalda gezinilebilen kartlar
 let modalIndex = -1;
 let runId = 0;        // eski aramaların sonuçları yeni sayfayı ezmesin
 const vodCache = new Map();     // kick kanalı -> Promise<vod[]>
 const channelCache = new Map(); // kick kanalı -> Promise<{avatar, live}>
+const streamersByGame = { pubg: [], lol: [] };
 
 // ---------- yardımcılar ----------
 const fmtClock = (sec) => {
@@ -42,7 +43,7 @@ const same = (a, b) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 const initial = (s) => esc((s || '?').trim().charAt(0).toUpperCase());
 // Kick "2026-11-02 21:28:33" biçiminde UTC verir
 const kickTime = (s) => new Date(s.replace(' ', 'T') + (s.endsWith('Z') ? '' : 'Z'));
-const playerPath = (shard, name) => `/players/${shard}/${encodeURIComponent(name)}`;
+const lolId = (s) => { s = String(s || '').trim(); return s.includes('#') ? s : `${s}#TR1`; }; // etiket yoksa TR1
 
 async function getJSON(url, opts) {
   const res = await fetch(url, opts);
@@ -69,6 +70,82 @@ function memo(map, key, fn) {
   }
   return map.get(key);
 }
+
+// ---------- oyunlar ----------
+const GAMES = {
+  pubg: {
+    id: 'pubg', label: 'PUBG', home: '/',
+    heroTitle: 'PUBG anlarını <span>Kick</span> yayınlarında izle',
+    heroText: 'Bir oyuncu adı yaz. Bir yayıncıyı vurduğu ya da bir yayıncı tarafından vurulduğu anları, o yayıncının kendi yayınından görürsün: birebir tepkiler.',
+    placeholder: 'PUBG oyuncu adı (büyük/küçük harf önemli)',
+    topPlaceholder: 'PUBG oyuncusu ara…',
+    recentKey: 'kr_recent',
+    streamersApi: '/api/streamers',
+    discoveryApi: '/api/discovery',
+    accountLabel: 'PUBG adı', accountPlaceholder: 'örn. chocoTaco',
+    playerPath: (name) => `/players/steam/${encodeURIComponent(name)}`,
+    normalize: (name) => name.trim(),
+    streamerName: (s) => s.pubgName,
+    streamerKey: (s) => s.pubgName.toLowerCase(),
+    deleteUrl: (s) => `/api/streamers/${encodeURIComponent(s.pubgName)}`,
+    addBody: (account, kick) => ({ pubgName: account, shard: 'steam', kick }),
+    fetchPlayer: async (name) => {
+      const p = await getJSON(`/api/pubg/steam/player/${encodeURIComponent(name)}`);
+      return { name: p.name, key: p.name.toLowerCase(), matchIds: p.matchIds };
+    },
+    fetchMatch: (id) => getJSON(`/api/pubg/steam/match/${id}`),
+    fetchEvents: async (m, player) => {
+      const full = await getJSON(`/api/pubg/steam/match/${m.id}/events?player=${encodeURIComponent(player.name)}`);
+      m.events = full.events;
+      m.placement = full.placement;
+    },
+    otherKey: (ev) => String(ev.other || '').toLowerCase(),
+    matchBadge: (m) => (m.placement ? `<span class="place ${m.placement === 1 ? 'win' : ''}">#${m.placement}</span>` : ''),
+    filters: { all: 'Tümü', kill: 'Öldürmeler', knock: 'Düşürmeler', death: 'Ölümler' },
+    loadingMatches: 'PUBG maçları alınıyor…',
+    loadingEvents: 'Telemetri işleniyor…',
+    noMatches: 'Son 14 günde maç bulunamadı.',
+    noEvents: 'Bu maçta öldürme/düşürme yok.',
+    emptyStreamers: 'Henüz yayıncı yok. Otomatik bulma, Kick\'te PUBG yayını yapan kanalları birkaç dakika içinde eklemeye başlar.',
+  },
+  lol: {
+    id: 'lol', label: 'LoL', home: '/lol',
+    heroTitle: 'LoL anlarını <span>Kick</span> yayınlarında izle',
+    heroText: 'Bir Riot ID yaz. Bir yayıncıyı öldürdüğü ya da bir yayıncıya öldüğü anları, o yayıncının kendi yayınından görürsün: birebir tepkiler.',
+    placeholder: 'Riot ID, örn. Ad#TR1 (etiket yoksa TR1 sayılır)',
+    topPlaceholder: 'Riot ID ara (Ad#TR1)…',
+    recentKey: 'kr_recent_lol',
+    streamersApi: '/api/lol/streamers',
+    discoveryApi: '/api/lol/discovery',
+    accountLabel: 'Riot ID', accountPlaceholder: 'örn. Ad#TR1',
+    playerPath: (name) => `/lol/players/${encodeURIComponent(name)}`,
+    normalize: lolId,
+    streamerName: (s) => s.riotId,
+    streamerKey: (s) => s.puuid,
+    deleteUrl: (s) => `/api/lol/streamers/${encodeURIComponent(s.puuid)}`,
+    addBody: (account, kick) => ({ riotId: lolId(account), kick }),
+    fetchPlayer: async (name) => {
+      const p = await getJSON(`/api/lol/player/${encodeURIComponent(name)}`);
+      return { name: p.name, key: p.puuid, puuid: p.puuid, matchIds: p.matchIds };
+    },
+    fetchMatch: (id) => getJSON(`/api/lol/match/${encodeURIComponent(id)}`),
+    fetchEvents: async (m, player) => {
+      const full = await getJSON(`/api/lol/match/${encodeURIComponent(m.id)}/events?puuid=${encodeURIComponent(player.puuid)}`);
+      m.events = full.events;
+      m.result = full.result;
+      if (full.champion) m.mode = `${full.champion} · ${full.kda}`;
+    },
+    otherKey: (ev) => ev.otherPuuid,
+    matchBadge: (m) => (m.result ? `<span class="place ${m.result === 'win' ? 'win' : 'loss'}">${m.result === 'win' ? 'Zafer' : 'Yenilgi'}</span>` : ''),
+    filters: { all: 'Tümü', kill: 'Öldürmeler', death: 'Ölümler' },
+    loadingMatches: 'LoL maçları alınıyor…',
+    loadingEvents: 'Maç zaman çizelgeleri işleniyor…',
+    noMatches: 'Son maç bulunamadı.',
+    noEvents: 'Bu maçta öldürme/ölüm yok.',
+    emptyStreamers: 'Henüz LoL yayıncısı yok. Otomatik bulma, Kick\'te LoL yayını yapan kanalları zamanla ekler; yönetici sayfasından elle de eklenebilir.',
+  },
+};
+const gameOfPath = () => (location.pathname === '/lol' || location.pathname.startsWith('/lol/') ? GAMES.lol : GAMES.pubg);
 
 // ---------- veri kaynakları ----------
 function getKickVods(slug) {
@@ -103,12 +180,12 @@ function findVod(vods, date) {
   return vods.find((v) => t >= v.start.getTime() - MATCH_GRACE_MS && t <= v.end.getTime() + MATCH_GRACE_MS) || null;
 }
 
-async function loadStreamers() {
-  try { streamers = await getJSON('/api/streamers'); } catch { streamers = []; }
-  return streamers;
+async function loadStreamers(G) {
+  try { streamersByGame[G.id] = await getJSON(G.streamersApi); } catch { streamersByGame[G.id] = []; }
+  return streamersByGame[G.id];
 }
 
-// Demo: ilk kayıtlı yayıncının gerçek Kick VOD'u, sahte PUBG maçları
+// Demo (sadece PUBG): ilk kayıtlı yayıncının gerçek Kick VOD'u, sahte maçlar
 function demoMatches(vods, streamer) {
   const v = vods.find((x) => !x.live && x.end - x.start > 3 * 3600_000) || vods[0];
   if (!v) return [];
@@ -147,21 +224,28 @@ function route() {
   closeModal();
   runId++;
   const parts = location.pathname.split('/').filter(Boolean);
-  $('topSearch').hidden = !parts.length;
+  const admin = parts[0] === 'streamers';
+  const G = gameOfPath();
+  // menü: hangi oyundayız
+  document.querySelectorAll('.game-nav a').forEach((a) => a.classList.toggle('on', !admin && a.dataset.game === G.id));
+  const isHome = !parts.length || (parts.length === 1 && parts[0] === 'lol');
+  $('topSearch').hidden = isHome || admin;
+  $('topSearch').elements.name.placeholder = G.topPlaceholder;
+  bindSearch($('topSearch'), G);
   window.scrollTo(0, 0);
-  if (parts[0] === 'players' && parts[1] && parts[2]) return playerPage(parts[1], decodeURIComponent(parts[2]));
-  if (parts[0] === 'streamers') return streamersPage();
-  return homePage();
+  if (parts[0] === 'players' && parts[2]) return playerPage(GAMES.pubg, decodeURIComponent(parts[2]));
+  if (parts[0] === 'lol' && parts[1] === 'players' && parts[2]) return playerPage(GAMES.lol, decodeURIComponent(parts[2]));
+  if (admin) return streamersPage();
+  return homePage(G);
 }
 
-function bindSearch(form) {
+function bindSearch(form, G) {
   form.onsubmit = (e) => {
     e.preventDefault();
-    const name = form.elements.name.value.trim();
-    if (name) navigate(playerPath('steam', name));
+    const name = G.normalize(form.elements.name.value);
+    if (name && name !== '#TR1') navigate(G.playerPath(name));
   };
 }
-bindSearch($('topSearch'));
 
 // ---------- yayıncı kartları ----------
 function avatarHTML(s) {
@@ -186,88 +270,86 @@ function hydrateAvatars(root) {
   }
 }
 
-function streamerCard(s) {
-  return `<a class="streamer-card" href="${playerPath(s.shard, s.pubgName)}" data-link>
+function streamerCard(s, G) {
+  return `<a class="streamer-card" href="${G.playerPath(G.streamerName(s))}" data-link>
     ${avatarHTML(s)}
-    <span class="sc-text"><b>${esc(s.kick)}</b><small>${esc(s.pubgName)}</small></span>
+    <span class="sc-text"><b>${esc(s.kick)}</b><small>${esc(G.streamerName(s))}</small></span>
     <span class="live-pill" data-live="${esc(s.kick)}" ${s.live ? '' : 'hidden'}>CANLI</span>
   </a>`;
 }
 
-const sourceBadge = (s) => s.source === 'auto'
-  ? '<span class="src auto" title="Kick\'te PUBG yayını sırasında oynanan maçla doğrulandı">otomatik</span>'
+const sourceBadge = (s, G) => s.source === 'auto'
+  ? `<span class="src auto" title="Kick'te ${G.label} yayını sırasında oynanan maçla doğrulandı">otomatik</span>`
   : '<span class="src manual">elle</span>';
 
-function discoveryText(d) {
-  if (!d.enabled) return 'Otomatik bulma kapalı.';
+function discoveryText(d, G) {
+  if (!d.enabled) return G.id === 'lol' ? 'LoL otomatik bulma kapalı (RIOT_API_KEY tanımlı değil).' : 'Otomatik bulma kapalı.';
   const t = d.totals;
   const when = d.lastScan ? timeAgo(new Date(d.lastScan)) : 'henüz yapılmadı';
-  return `Kick'te şu an <b>${d.liveNow}</b> canlı PUBG yayını var. Son tarama: ${when}. ` +
+  return `Kick'te şu an <b>${d.liveNow}</b> canlı ${G.label} yayını var. Son tarama: ${when}. ` +
     `Bugüne kadar <b>${t.candidates}</b> kanal görüldü: <b>${t.linked}</b> eşleşti, ${t.pending} kontrol bekliyor, ` +
-    `${t.notfound + t.nomatch} kanalın PUBG adı bulunamadı.` + (d.lastError ? ` <span class="err">Son hata: ${esc(d.lastError)}</span>` : '');
+    `${t.notfound + t.nomatch} kanalın ${G.accountLabel} bulunamadı.` + (d.lastError ? ` <span class="err">Son hata: ${esc(d.lastError)}</span>` : '');
 }
 
 // ---------- son görüntülenenler ----------
-// Her ziyaretçinin kendi tarayıcısında tutulur (localStorage); erişilemezse sessizce boş kalır.
-const RECENT_KEY = 'kr_recent';
+// Her ziyaretçinin kendi tarayıcısında tutulur (localStorage), her oyun için ayrı; erişilemezse sessizce boş kalır.
 const RECENT_MAX = 8;
-function getRecent() {
-  try { const list = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]'); return Array.isArray(list) ? list.filter((x) => typeof x === 'string') : []; } catch { return []; }
+function getRecent(G) {
+  try { const list = JSON.parse(localStorage.getItem(G.recentKey) || '[]'); return Array.isArray(list) ? list.filter((x) => typeof x === 'string') : []; } catch { return []; }
 }
-function setRecent(list) {
-  try { localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, RECENT_MAX))); } catch { /* gizli pencere vb. */ }
+function setRecent(G, list) {
+  try { localStorage.setItem(G.recentKey, JSON.stringify(list.slice(0, RECENT_MAX))); } catch { /* gizli pencere vb. */ }
 }
-function addRecent(name) {
-  setRecent([name, ...getRecent().filter((x) => !same(x, name))]);
+function addRecent(G, name) {
+  setRecent(G, [name, ...getRecent(G).filter((x) => !same(x, name))]);
 }
-function drawRecent() {
+function drawRecent(G) {
   const box = $('recent');
   if (!box) return;
-  const list = getRecent();
+  const list = getRecent(G);
   box.hidden = !list.length;
   if (!list.length) { box.innerHTML = ''; return; }
   box.innerHTML = `<div class="recent-head"><span>Son görüntülenenler</span><button type="button" class="link-btn" data-clear>Temizle</button></div>
-    <div class="recent-list">${list.map((n) => `<span class="recent-chip"><a href="${playerPath('steam', n)}" data-link>${esc(n)}</a><button type="button" aria-label="${esc(n)} listeden kaldır" data-remove="${esc(n)}">✕</button></span>`).join('')}</div>`;
+    <div class="recent-list">${list.map((n) => `<span class="recent-chip"><a href="${G.playerPath(n)}" data-link>${esc(n)}</a><button type="button" aria-label="${esc(n)} listeden kaldır" data-remove="${esc(n)}">✕</button></span>`).join('')}</div>`;
   box.onclick = (e) => {
     const rm = e.target.closest('[data-remove]');
-    if (rm) { setRecent(getRecent().filter((x) => x !== rm.dataset.remove)); drawRecent(); }
-    if (e.target.closest('[data-clear]')) { setRecent([]); drawRecent(); }
+    if (rm) { setRecent(G, getRecent(G).filter((x) => x !== rm.dataset.remove)); drawRecent(G); }
+    if (e.target.closest('[data-clear]')) { setRecent(G, []); drawRecent(G); }
   };
 }
 
 // ---------- ana sayfa ----------
-async function homePage() {
+async function homePage(G) {
+  document.title = G.id === 'lol' ? 'LoL · Kick Report' : 'Kick Report';
   const app = $('app');
   app.innerHTML = `
     <section class="hero">
-      <h1>PUBG anlarını <span>Kick</span> yayınlarında izle</h1>
-      <p>Bir oyuncu adı yaz. Bir yayıncıyı vurduğu ya da bir yayıncı tarafından vurulduğu anları, o yayıncının kendi yayınından görürsün: birebir tepkiler.</p>
+      <h1>${G.heroTitle}</h1>
+      <p>${G.heroText}</p>
       <form id="heroSearch" class="search big">
-        <input name="name" placeholder="PUBG oyuncu adı (büyük/küçük harf önemli)" autocomplete="off" required>
+        <input name="name" placeholder="${esc(G.placeholder)}" autocomplete="off" required>
         <button type="submit">Ara</button>
       </form>
       <div id="recent" class="recent" hidden></div>
-      ${DEMO ? '<p class="note">Demo modu: PUBG verisi sahte, video ilk kayıtlı yayıncının gerçek Kick yayınından.</p>' : ''}
+      ${DEMO && G.id === 'pubg' ? '<p class="note">Demo modu: PUBG verisi sahte, video ilk kayıtlı yayıncının gerçek Kick yayınından.</p>' : ''}
     </section>
     <section>
-      <div class="section-head"><h2>Yayıncılar <span id="streamerTotal" class="muted"></span></h2></div>
+      <div class="section-head"><h2>${G.label} yayıncıları <span id="streamerTotal" class="muted"></span></h2></div>
       <div id="homeStreamers" class="streamer-grid"><div class="muted">Yükleniyor…</div></div>
     </section>`;
-  bindSearch($('heroSearch'));
+  bindSearch($('heroSearch'), G);
   $('heroSearch').elements.name.focus();
-  drawRecent();
+  drawRecent(G);
   const my = runId;
-  await loadStreamers();
+  const list = await loadStreamers(G);
   if (my !== runId) return;
   const grid = $('homeStreamers');
   // önce şu an canlı olanlar, sonra en son doğrulananlar
-  const shown = [...streamers]
+  const shown = [...list]
     .sort((a, b) => (b.live - a.live) || String(b.verifiedAt || '').localeCompare(String(a.verifiedAt || '')))
     .slice(0, 24);
-  $('streamerTotal').textContent = streamers.length ? `(${streamers.length})` : '';
-  grid.innerHTML = shown.length
-    ? shown.map(streamerCard).join('')
-    : '<div class="empty-box">Henüz yayıncı yok. Otomatik bulma, Kick\'te PUBG yayını yapan kanalları birkaç dakika içinde eklemeye başlar.</div>';
+  $('streamerTotal').textContent = list.length ? `(${list.length})` : '';
+  grid.innerHTML = shown.length ? shown.map((s) => streamerCard(s, G)).join('') : `<div class="empty-box">${G.emptyStreamers}</div>`;
   hydrateAvatars(grid);
 }
 
@@ -277,7 +359,7 @@ async function streamersPage() {
   const my = runId;
   const me = await getJSON('/api/admin/me').catch(() => ({ admin: false }));
   if (my !== runId) return;
-  if (me.admin) return adminStreamersPage();
+  if (me.admin) return adminStreamersPage(GAMES.pubg);
   document.title = 'Yönetici girişi · Kick Report';
   $('app').innerHTML = `
     <section class="login">
@@ -296,7 +378,7 @@ async function streamersPage() {
     btn.disabled = true;
     try {
       await getJSON('/api/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: form.elements.password.value }) });
-      adminStreamersPage();
+      adminStreamersPage(GAMES.pubg);
     } catch (err) {
       setStatus($('loginStatus'), err.message, true);
       form.elements.password.select();
@@ -306,42 +388,48 @@ async function streamersPage() {
   };
 }
 
-async function adminStreamersPage() {
+async function adminStreamersPage(G) {
   document.title = 'Yayıncılar · Kick Report';
   const app = $('app');
   app.innerHTML = `
     <section class="page-head">
       <button id="logoutBtn" class="ghost logout">Çıkış yap</button>
       <h1>Yayıncılar</h1>
-      <p class="muted">Kick'te PUBG yayını yapan kanallar otomatik bulunur: kanal adıyla aynı adlı PUBG hesabının yayın sırasında maç oynadığı görülünce eşleşme eklenir. Oyunda farklı ad kullananları aşağıdan elle ekleyebilirsin.</p>
+      <div class="tabs admin-tabs" id="adminTabs">${Object.values(GAMES).map((g) => `<button data-game="${g.id}" class="${g.id === G.id ? 'on' : ''}">${g.label}</button>`).join('')}</div>
+      <p class="muted">Kick'te ${G.label} yayını yapan kanallar otomatik bulunur: kanal adıyla aynı ${G.accountLabel} hesabının yayın sırasında maç oynadığı görülünce eşleşme eklenir. Oyunda farklı ad kullananları aşağıdan elle ekleyebilirsin.</p>
     </section>
     <div id="discoveryBox" class="panel discovery"><span class="muted">Otomatik bulma durumu yükleniyor…</span></div>
     <div id="addStatus" class="status"></div>
     <div class="list-head">
-      <h2>Eşleşen yayıncılar <span id="matchedCount" class="muted"></span></h2>
-      <input id="streamerFilter" type="search" placeholder="Kanal ya da PUBG adı ara…" autocomplete="off">
+      <h2>Eşleşen ${G.label} yayıncıları <span id="matchedCount" class="muted"></span></h2>
+      <input id="streamerFilter" type="search" placeholder="Kanal ya da ${esc(G.accountLabel)} ara…" autocomplete="off">
     </div>
     <div id="streamerTable" class="streamer-list"></div>
     <div id="moreRows"></div>
     <section id="unmatchedBox" hidden>
-      <h2>PUBG adı bulunamayanlar</h2>
-      <p class="muted small">Bu kanallar Kick'te PUBG oynuyor ama oyunda farklı bir ad kullanıyor olabilir. PUBG adını biliyorsan yaz, eşleştir.</p>
+      <h2>${G.accountLabel} bulunamayanlar</h2>
+      <p class="muted small">Bu kanallar Kick'te ${G.label} oynuyor ama oyunda farklı bir ad kullanıyor olabilir. ${G.accountLabel} biliyorsan yaz, eşleştir.</p>
       <div id="unmatchedList" class="streamer-list"></div>
     </section>
     <details class="panel manual-add">
-      <summary>Elle yayıncı ekle</summary>
+      <summary>Elle ${G.label} yayıncısı ekle</summary>
       <form id="addStreamer" class="add-form">
-        <label>PUBG adı<input name="pubgName" required placeholder="örn. chocoTaco" autocomplete="off"></label>
+        <label>${G.accountLabel}<input name="account" required placeholder="${esc(G.accountPlaceholder)}" autocomplete="off"></label>
         <label>Kick kanalı<input name="kick" required placeholder="örn. kanaladi" autocomplete="off"></label>
         <button type="submit">Ekle</button>
       </form>
     </details>`;
 
-  async function add(body, btn) {
+  $('adminTabs').onclick = (e) => {
+    const b = e.target.closest('button[data-game]');
+    if (b && b.dataset.game !== G.id) adminStreamersPage(GAMES[b.dataset.game]);
+  };
+
+  async function add(account, kick, btn) {
     btn.disabled = true;
     try {
-      const s = await getJSON('/api/streamers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      setStatus($('addStatus'), `${s.pubgName} → kick.com/${s.kick} eklendi.`);
+      const s = await getJSON(G.streamersApi, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(G.addBody(account, kick)) });
+      setStatus($('addStatus'), `${G.streamerName(s)} → kick.com/${s.kick} eklendi.`);
       draw();
       return true;
     } catch (err) {
@@ -361,7 +449,7 @@ async function adminStreamersPage() {
   const form = $('addStreamer');
   form.onsubmit = async (e) => {
     e.preventDefault();
-    const ok = await add({ pubgName: form.elements.pubgName.value.trim(), shard: 'steam', kick: form.elements.kick.value.trim() }, form.querySelector('button'));
+    const ok = await add(form.elements.account.value.trim(), form.elements.kick.value.trim(), form.querySelector('button'));
     if (ok) form.reset();
   };
 
@@ -372,20 +460,21 @@ async function adminStreamersPage() {
   function drawRows() {
     const box = $('streamerTable');
     if (!box) return;
+    const all0 = streamersByGame[G.id];
     const q = $('streamerFilter').value.trim().toLowerCase();
-    const all = [...streamers]
-      .filter((s) => !q || s.kick.includes(q) || s.pubgName.toLowerCase().includes(q))
+    const all = [...all0]
+      .filter((s) => !q || s.kick.includes(q) || G.streamerName(s).toLowerCase().includes(q))
       .sort((a, b) => (b.live - a.live) || a.kick.localeCompare(b.kick));
-    $('matchedCount').textContent = `(${streamers.length})`;
-    box.innerHTML = all.length ? '' : `<div class="empty-box">${q ? 'Aramaya uyan yayıncı yok.' : 'Henüz eşleşen yayıncı yok. Otomatik bulma birkaç dakika içinde eklemeye başlar.'}</div>`;
+    $('matchedCount').textContent = `(${all0.length})`;
+    box.innerHTML = all.length ? '' : `<div class="empty-box">${q ? 'Aramaya uyan yayıncı yok.' : 'Henüz eşleşen yayıncı yok. Otomatik bulma zamanla ekler; aşağıdan elle de ekleyebilirsin.'}</div>`;
     for (const s of all.slice(0, limit)) {
       const row = document.createElement('div');
       row.className = 'streamer-row';
       row.innerHTML = `${avatarHTML(s)}
-        <span class="sc-text"><b>${esc(s.kick)}</b><small>${esc(s.pubgName)}</small></span>
+        <span class="sc-text"><b>${esc(s.kick)}</b><small>${esc(G.streamerName(s))}</small></span>
         <span class="live-pill" data-live="${esc(s.kick)}" ${s.live ? '' : 'hidden'}>CANLI</span>
-        ${sourceBadge(s)}
-        <a href="${playerPath(s.shard, s.pubgName)}" data-link class="ghost-link">Anları</a>
+        ${sourceBadge(s, G)}
+        <a href="${G.playerPath(G.streamerName(s))}" data-link class="ghost-link">Anları</a>
         <a href="https://kick.com/${encodeURIComponent(s.kick)}" target="_blank" rel="noopener" class="ghost-link">Kick ↗</a>`;
       const del = document.createElement('button');
       del.className = 'ghost';
@@ -393,7 +482,7 @@ async function adminStreamersPage() {
       del.title = s.source === 'auto' ? 'Yanlış eşleşmeyse sil, tekrar otomatik eklenmez' : '';
       del.onclick = async () => {
         if (!confirm(`${s.kick} silinsin mi?`)) return;
-        await getJSON(`/api/streamers/${encodeURIComponent(s.pubgName)}`, { method: 'DELETE' }).catch((err) => setStatus($('addStatus'), err.message, true));
+        await getJSON(G.deleteUrl(s), { method: 'DELETE' }).catch((err) => setStatus($('addStatus'), err.message, true));
         draw();
       };
       row.appendChild(del);
@@ -421,22 +510,22 @@ async function adminStreamersPage() {
       row.className = 'streamer-row unmatched';
       const why = c.status === 'nomatch'
         ? `"${esc(c.pubgName)}" adlı hesap var ama yayın sırasında maçı yok`
-        : c.tried.length ? `Denenen: ${c.tried.map(esc).join(', ')}` : 'Kanal adı geçerli bir PUBG adı değil';
+        : c.tried.length ? `Denenen: ${c.tried.map(esc).join(', ')}` : `Kanal adı geçerli bir ${esc(G.accountLabel)} değil`;
       row.innerHTML = `${avatarHTML({ kick: c.slug, avatar: c.avatar, live: c.live })}
         <span class="sc-text"><b>${esc(c.slug)}</b><small>${why}</small></span>
-        <input name="pubgName" placeholder="PUBG adı" required autocomplete="off">
+        <input name="account" placeholder="${esc(G.accountLabel)}" required autocomplete="off">
         <button type="submit" class="ghost">Eşleştir</button>`;
-      row.onsubmit = (e) => { e.preventDefault(); add({ pubgName: row.elements.pubgName.value.trim(), shard: 'steam', kick: c.slug }, row.querySelector('button')); };
+      row.onsubmit = (e) => { e.preventDefault(); add(row.elements.account.value.trim(), c.slug, row.querySelector('button')); };
       box.appendChild(row);
     }
   }
 
   async function draw() {
     let expired = false;
-    const [, d] = await Promise.all([loadStreamers(), getJSON('/api/discovery').catch((e) => { expired = e.status === 401; return null; })]);
+    const [, d] = await Promise.all([loadStreamers(G), getJSON(G.discoveryApi).catch((e) => { expired = e.status === 401; return null; })]);
     if (expired) return streamersPage(); // oturum süresi doldu: giriş formuna dön
     if (!$('streamerTable')) return;
-    $('discoveryBox').innerHTML = d ? discoveryText(d) : 'Otomatik bulma durumu alınamadı.';
+    $('discoveryBox').innerHTML = d ? discoveryText(d, G) : 'Otomatik bulma durumu alınamadı.';
     drawRows();
     drawUnmatched(d);
   }
@@ -450,15 +539,15 @@ function setStatus(el, msg, isError = false) {
 }
 
 // ---------- oyuncu sayfası ----------
-async function playerPage(shard, name) {
+async function playerPage(G, name) {
   const my = runId;
   const app = $('app');
   $('topSearch').elements.name.value = name;
-  document.title = `${name} · Kick Report`;
+  document.title = `${name} · ${G.label} · Kick Report`;
   app.innerHTML = `
     <section class="player-head">
-      <div class="ph-avatar">${initial(name)}</div>
-      <div><h1 id="playerName">${esc(name)}</h1></div>
+      <div class="ph-avatar ${G.id}">${initial(name)}</div>
+      <div><div class="ph-game">${G.label}</div><h1 id="playerName">${esc(name)}</h1></div>
       <div id="stats" class="stats"></div>
     </section>
     <div id="progress" class="progress"><div class="bar"></div><span id="progressText">Hazırlanıyor…</span></div>
@@ -472,28 +561,27 @@ async function playerPage(shard, name) {
     if (pct != null) app.querySelector('.progress .bar').style.width = pct + '%';
   };
   try {
-    let matches, playerName = name, checked = 0;
-    await loadStreamers();
-    if (DEMO) {
+    let matches, player = { name, key: name.toLowerCase() }, checked = 0;
+    const streamers = await loadStreamers(G);
+    if (DEMO && G.id === 'pubg') {
       const s = streamers[0];
       if (!s) throw new Error('Demo için önce en az bir yayıncı kaydet.');
       progress('Kick yayınları alınıyor…', 50);
       matches = demoMatches(await getKickVods(s.kick), s);
       checked = matches.length;
     } else {
-      if (!streamers.length) throw new Error('Henüz kayıtlı yayıncı yok. Yayıncılar otomatik bulundukça arama sonuç vermeye başlar.');
-      progress('PUBG maçları alınıyor…', 5);
-      const player = await getJSON(`/api/pubg/${shard}/player/${encodeURIComponent(name)}`);
+      if (!streamers.length) throw new Error(`Henüz kayıtlı ${G.label} yayıncısı yok. Yayıncılar eklendikçe arama sonuç vermeye başlar.`);
+      progress(G.loadingMatches, 5);
+      player = await G.fetchPlayer(name);
       if (my !== runId) return;
-      playerName = player.name;
-      addRecent(player.name); // sadece gerçekten bulunan oyuncular, PUBG'deki doğru yazımıyla
+      addRecent(G, player.name); // sadece gerçekten bulunan oyuncular, oyundaki doğru yazımıyla
       $('playerName').textContent = player.name;
       const ids = player.matchIds.slice(0, 20);
-      if (!ids.length) throw new Error('Son 14 günde maç bulunamadı.');
+      if (!ids.length) throw new Error(G.noMatches);
 
       let done = 0;
       const summaries = (await pool(ids, 4, async (id) => {
-        const m = await getJSON(`/api/pubg/${shard}/match/${id}`);
+        const m = await G.fetchMatch(id);
         progress(`Maçlar kontrol ediliyor… ${++done}/${ids.length}`, 5 + (done / ids.length) * 35);
         return m;
       })).filter((m) => m && !m.error);
@@ -515,20 +603,20 @@ async function playerPage(shard, name) {
         }
       }
 
+      // Sadece yayında görünen maçların olaylarını çek; oyuncunun kendisi yayıncı değilse
+      // ve maçtaki yayıncılar oyuncuyla hiç karşılaşmadıysa kart çıkmaz (birebir etkileşim)
       const hits = summaries.filter((m) => m.streams.length);
       done = 0;
       await pool(hits, 2, async (m) => {
-        const full = await getJSON(`/api/pubg/${shard}/match/${m.id}/events?player=${encodeURIComponent(playerName)}`);
-        m.events = full.events;
-        m.placement = full.placement;
-        progress(`Telemetri işleniyor… ${++done}/${hits.length}`, 55 + (done / Math.max(1, hits.length)) * 45);
+        await G.fetchEvents(m, player);
+        progress(`${G.loadingEvents} ${++done}/${hits.length}`, 55 + (done / Math.max(1, hits.length)) * 45);
       });
       matches = summaries;
       if (failed.length) setStatus($('pageStatus'), `Yayınları alınamayan kanallar: ${failed.join(', ')}`, true);
     }
     if (my !== runId) return;
     $('progress').remove();
-    renderPlayer(matches, playerName, checked);
+    renderPlayer(G, matches, player, checked);
   } catch (err) {
     if (my !== runId) return;
     $('progress')?.remove();
@@ -537,43 +625,41 @@ async function playerPage(shard, name) {
 }
 
 // Bir olay için yayın rolü: kendi yayını, rakibin yayını, maçtaki diğer yayıncılar
-function roleOf(st, playerName, ev) {
-  if (same(st.streamer.pubgName, playerName)) return 'own';
-  if (ev && same(st.streamer.pubgName, ev.other)) return 'enemy';
+function roleOf(G, st, player, ev) {
+  const key = G.streamerKey(st.streamer);
+  if (key && key === player.key) return 'own';
+  if (ev && key && key === G.otherKey(ev)) return 'enemy';
   return 'other';
 }
 const ROLE_ORDER = ['own', 'enemy', 'other'];
 
 // Sadece yayıncının birebir dahil olduğu anlar: oyuncunun kendi yayını ya da
-// oyuncunun vurduğu / oyuncuyu vuran yayıncının yayını. Maçtaki diğer yayıncılar gösterilmez.
-function buildCards(m, playerName) {
+// oyuncunun öldürdüğü / oyuncuyu öldüren yayıncının yayını. Maçtaki diğer yayıncılar gösterilmez.
+function buildCards(G, m, player) {
   const cards = [];
   for (const ev of m.events || []) {
     const outgoing = ev.type === 'kill' || ev.type === 'knock';
     for (const st of m.streams) {
-      const role = roleOf(st, playerName, ev);
+      const role = roleOf(G, st, player, ev);
       if (role === 'other') continue;
       cards.push({
         match: m, ev, role, streamer: st.streamer, vod: st.vod,
         at: (new Date(ev.time) - st.vod.start) / 1000,
-        from: outgoing ? playerName : ev.other, to: outgoing ? ev.other : playerName,
+        from: outgoing ? player.name : ev.other, to: outgoing ? ev.other : player.name,
       });
     }
   }
   return cards.sort((a, b) => a.ev.time.localeCompare(b.ev.time) || ROLE_ORDER.indexOf(a.role) - ROLE_ORDER.indexOf(b.role));
 }
 
-const FILTERS = {
-  type: { all: 'Tümü', kill: 'Öldürmeler', knock: 'Düşürmeler', death: 'Ölümler' },
-  role: { all: 'Bütün yayınlar', own: 'Kendi yayını', enemy: 'Rakip tepkileri' },
-};
+const ROLE_FILTER = { all: 'Bütün yayınlar', own: 'Kendi yayını', enemy: 'Rakip tepkileri' };
 const matchesFilter = (c, f) =>
   (f.type === 'all' || c.ev.type === f.type || (f.type === 'death' && c.ev.type === 'knocked')) &&
   (f.role === 'all' || c.role === f.role);
 
-function renderPlayer(matches, playerName, checked) {
+function renderPlayer(G, matches, player, checked) {
   matches.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  matches.forEach((m) => { m.cards = m.streams?.length ? buildCards(m, playerName) : []; });
+  matches.forEach((m) => { m.cards = m.streams?.length ? buildCards(G, m, player) : []; });
   // sadece yayıncıyla birebir etkileşim olan maçlar
   const inStream = matches.filter((m) => m.cards.length);
   const evs = [...new Set(inStream.flatMap((m) => m.cards.map((c) => c.ev)))];
@@ -594,7 +680,7 @@ function renderPlayer(matches, playerName, checked) {
   const f = { type: 'all', role: 'all' };
   const filters = $('filters');
   filters.hidden = false;
-  filters.innerHTML = Object.entries(FILTERS).map(([key, opts]) =>
+  filters.innerHTML = Object.entries({ type: G.filters, role: ROLE_FILTER }).map(([key, opts]) =>
     `<div class="tabs" data-key="${key}">${Object.entries(opts).map(([v, l]) => `<button data-v="${v}" class="${v === 'all' ? 'on' : ''}">${l}</button>`).join('')}</div>`).join('');
   filters.onclick = (e) => {
     const b = e.target.closest('button[data-v]');
@@ -614,22 +700,21 @@ function renderPlayer(matches, playerName, checked) {
       const created = new Date(m.createdAt);
       const sec = document.createElement('section');
       sec.className = 'match';
-      const place = m.placement ? `<span class="place ${m.placement === 1 ? 'win' : ''}">#${m.placement}</span>` : '';
       sec.innerHTML = `
         <div class="match-head">
-          ${place}
+          ${G.matchBadge(m)}
           <div class="mh-main"><b>${esc(m.map)}</b> <span class="muted">${esc(m.mode)}</span></div>
           <div class="mh-meta">${fmtDate(created)} · ${timeAgo(created)} · ${Math.round((m.duration || 0) / 60)} dk</div>
           <div class="mh-streams">${m.streams.filter((st) => m.cards.some((c) => c.streamer.kick === st.streamer.kick)).map((st) => `<button class="chip" data-start="${esc(st.streamer.kick)}" title="Maçın başından izle">${avatarHTML(st.streamer)}${esc(st.streamer.kick)} ▶</button>`).join('')}</div>
         </div>`;
       sec.querySelectorAll('[data-start]').forEach((b) => {
         const st = m.streams.find((x) => x.streamer.kick === b.dataset.start);
-        b.onclick = () => openModal([{ match: m, ev: { type: 'start', other: m.map, weapon: m.mode, time: m.createdAt }, role: roleOf(st, playerName, null),
+        b.onclick = () => openModal([{ match: m, ev: { type: 'start', other: m.map, weapon: m.mode, time: m.createdAt }, role: roleOf(G, st, player, null),
           streamer: st.streamer, vod: st.vod, at: (created - st.vod.start) / 1000, from: m.map, to: m.mode }], 0);
       });
       const grid = document.createElement('div');
       grid.className = 'card-grid';
-      if (!cards.length) grid.innerHTML = `<div class="muted small">${m.events?.length ? 'Bu filtreye uyan an yok.' : 'Bu maçta öldürme/düşürme yok.'}</div>`;
+      if (!cards.length) grid.innerHTML = `<div class="muted small">${m.events?.length ? 'Bu filtreye uyan an yok.' : G.noEvents}</div>`;
       for (const c of cards) {
         const idx = visible.push(c) - 1;
         grid.appendChild(cardEl(c, () => openModal(visible, idx)));
@@ -813,7 +898,7 @@ document.addEventListener('keydown', (e) => {
 
 // ---------- başlangıç ----------
 // Eski ?name=..&shard=.. bağlantılarını yeni adrese çevir
-if (query.get('name')) history.replaceState(null, '', playerPath(query.get('shard') || 'steam', query.get('name')) + SUFFIX);
+if (query.get('name')) history.replaceState(null, '', GAMES.pubg.playerPath(query.get('name')) + SUFFIX);
 route();
 
 // Footer telif yılı

@@ -2,7 +2,7 @@
   "id": "/",
   "name": "Kick Report",
   "short_name": "Kick Report",
-  "description": "PUBG öldürme anlarını, karşılaşılan yayıncının Kick yayınından izle.",
+  "description": "PUBG ve LoL öldürme anlarını, karşılaşılan yayıncının Kick yayınından izle.",
   "lang": "tr",
   "dir": "ltr",
   "start_url": "/",

@@ -1,4 +1,4 @@
-// Sahte PUBG API + sahte Kick yanıtı ile uçtan uca test
+// Sahte PUBG API + sahte Riot API + sahte Kick yanıtı ile uçtan uca test
 // Çalıştırma: npm test  (playwright gerekir; PW_CHANNEL=msedge ile sistemdeki Edge kullanılabilir)
 const http = require('http'); const zlib = require('zlib'); const assert = require('assert');
 const fs = require('fs'); const os = require('os'); const path = require('path');
@@ -6,6 +6,7 @@ const fs = require('fs'); const os = require('os'); const path = require('path')
 process.env.ADMIN_PASSWORD = 'gizli-sifre';
 process.env.DISCOVERY = '0';
 const { extractEvents } = require('../server.js');
+const { extractLolEvents, parseRiotId } = require('../lol.js');
 delete process.env.DISCOVERY;
 const P = (n) => ({ name: n, accountId: 'a.' + n });
 const tel = [
@@ -21,6 +22,34 @@ assert.deepStrictEqual(ev.map(e => e.type), ['knock', 'kill', 'knocked', 'death'
 assert.strictEqual(ev[0].weapon, 'HK416'); assert.strictEqual(ev[0].distance, 45); assert.strictEqual(ev[3].other, 'Çevre / mavi bölge');
 console.log('extractEvents OK');
 
+// --- LoL: Oyuncu#TR1 (Ahri) maçta yayıncı Rakip#TR1'i (Zed) öldürüyor ve ondan ölüyor;
+//     aynı maçtaki yayıncı Seyirci#TR1 (Lux) oyuncuyla hiç karşılaşmıyor; bir ölüm de kuleden.
+const LOL_START = Date.parse('2026-11-02T22:00:00Z');
+const LOL_ACCOUNTS = {
+  'oyuncu#tr1': { puuid: 'p-me', gameName: 'Oyuncu', tagLine: 'TR1' },
+  'rakip#tr1': { puuid: 'p-rakip', gameName: 'Rakip', tagLine: 'TR1' },
+  'seyirci#tr1': { puuid: 'p-x', gameName: 'Seyirci', tagLine: 'TR1' },
+};
+const lp = (id, puuid, name, champ, win, k, d, a) => ({ participantId: id, puuid, riotIdGameName: name, riotIdTagline: 'TR1', championName: champ, win, kills: k, deaths: d, assists: a });
+const LOL_MATCH = {
+  metadata: { matchId: 'TR1_1001', participants: ['p-me', 'p-rakip', 'p-x'] },
+  info: { gameStartTimestamp: LOL_START, gameDuration: 1800, queueId: 420, gameMode: 'CLASSIC',
+    participants: [lp(1, 'p-me', 'Oyuncu', 'Ahri', true, 5, 2, 7), lp(6, 'p-rakip', 'Rakip', 'Zed', false, 1, 4, 2), lp(7, 'p-x', 'Seyirci', 'Lux', true, 3, 1, 9)] },
+};
+const LOL_TL = { info: { participants: [{ participantId: 1, puuid: 'p-me' }, { participantId: 6, puuid: 'p-rakip' }, { participantId: 7, puuid: 'p-x' }], frames: [
+  { events: [{ type: 'CHAMPION_KILL', timestamp: 300100, killerId: 1, victimId: 6 }, { type: 'WARD_PLACED', timestamp: 310000 }] },
+  { events: [{ type: 'CHAMPION_KILL', timestamp: 400000, killerId: 7, victimId: 6 }] },
+  { events: [{ type: 'CHAMPION_KILL', timestamp: 900000, killerId: 6, victimId: 1 }, { type: 'CHAMPION_KILL', timestamp: 1000000, killerId: 0, victimId: 1 }] },
+] } };
+const lev = extractLolEvents(LOL_MATCH, LOL_TL, 'p-me');
+assert.deepStrictEqual(lev.map((e) => [e.type, e.other, e.weapon]), [
+  ['kill', 'Rakip#TR1', 'Ahri → Zed'], ['death', 'Rakip#TR1', 'Zed → Ahri'], ['death', 'Kule / minyon', 'Kule / minyon → Ahri']]);
+assert.strictEqual(lev[0].time, '2026-11-02T22:05:00.100Z');
+assert.strictEqual(lev[0].otherPuuid, 'p-rakip');
+assert.deepStrictEqual(parseRiotId('Faker'), { gameName: 'Faker', tagLine: 'TR1' });
+assert.deepStrictEqual(parseRiotId(' Hide on bush #KR1 '), { gameName: 'Hide on bush', tagLine: 'KR1' });
+console.log('extractLolEvents OK');
+
 const participant = (n) => ({ type: 'participant', attributes: { stats: { name: n, winPlace: 3 } } });
 const mock = http.createServer((req, res) => {
   const u = decodeURIComponent(req.url);
@@ -31,6 +60,16 @@ const mock = http.createServer((req, res) => {
   if (u === '/shards/steam/matches/m1') return res.end(JSON.stringify({ data: { attributes: { createdAt: '2026-11-02T22:00:00Z', duration: 1800, mapName: 'Baltic_Main', gameMode: 'squad-fpp' } },
     included: [participant('Me'), participant('Bob'), participant('X'), { type: 'asset', attributes: { URL: 'http://127.0.0.1:4100/tel.json' } }] }));
   if (u === '/shards/steam/matches/m2') return res.end(JSON.stringify({ data: { attributes: { createdAt: '2026-10-01T10:00:00Z', duration: 1500, mapName: 'Desert_Main', gameMode: 'solo' } }, included: [participant('Me')] }));
+  if (u.startsWith('/riot/')) {
+    const [, , cluster, ...rest] = u.split('?')[0].split('/');
+    const p = '/' + rest.join('/');
+    const acc = p.match(/^\/riot\/account\/v1\/accounts\/by-riot-id\/([^/]+)\/([^/]+)$/);
+    if (acc) { const a = LOL_ACCOUNTS[(acc[1] + '#' + acc[2]).toLowerCase()]; if (a) return res.end(JSON.stringify(a)); res.statusCode = 404; return res.end('{}'); }
+    const ids = p.match(/^\/lol\/match\/v5\/matches\/by-puuid\/([^/]+)\/ids$/);
+    if (ids) return res.end(JSON.stringify(cluster === 'europe' && ids[1] === 'p-me' ? ['TR1_1001'] : []));
+    if (p === '/lol/match/v5/matches/TR1_1001') return res.end(JSON.stringify(LOL_MATCH));
+    if (p === '/lol/match/v5/matches/TR1_1001/timeline') return res.end(JSON.stringify(LOL_TL));
+  }
   if (u === '/tel.json') { res.setHeader('Content-Type', 'application/octet-stream'); return res.end(zlib.gzipSync(JSON.stringify(tel))); }
   res.statusCode = 404; res.end('{}');
 }).listen(4100);
@@ -39,6 +78,10 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kick-report-'));
 process.env.STREAMERS_FILE = path.join(tmp, 'streamers.json');
 process.env.DISCOVERY_FILE = path.join(tmp, 'discovery.json');
 process.env.PUBG_API_KEY = 'test'; process.env.PUBG_API_BASE = 'http://127.0.0.1:4100';
+process.env.LOL_STREAMERS_FILE = path.join(tmp, 'lol-streamers.json');
+process.env.LOL_DISCOVERY_FILE = path.join(tmp, 'lol-discovery.json');
+process.env.RIOT_API_KEY = 'test'; process.env.RIOT_API_BASE = 'http://127.0.0.1:4100/riot';
+process.env.DISCOVERY = '0';
 process.env.ADMIN_PASSWORD = 'gizli-sifre';
 delete require.cache[require.resolve('../server.js')];
 const { server } = require('../server.js');
@@ -68,6 +111,17 @@ server.listen(4000, async () => {
   await add('Bob', 'BobKanal');
   await add('Nobody', 'yok');
   await add('X', 'xkanal'); // aynı maçta ama Me ile etkileşimi yok
+  // LoL yayıncıları: Riot ID ile eklenir, puuid ile saklanır; etiket yazılmazsa TR1
+  assert.strictEqual((await raw('/api/lol/streamers', { method: 'POST', headers: { cookie: '' }, body: JSON.stringify({ riotId: 'Rakip#TR1', kick: 'rakipkanal' }) })).status, 401);
+  const rk = await api('/api/lol/streamers', { method: 'POST', body: JSON.stringify({ riotId: 'rakip#tr1', kick: 'RakipKanal' }) });
+  assert.deepStrictEqual([rk.riotId, rk.puuid, rk.kick], ['Rakip#TR1', 'p-rakip', 'rakipkanal']);
+  await api('/api/lol/streamers', { method: 'POST', body: JSON.stringify({ riotId: 'Seyirci', kick: 'seyircikanal' }) });
+  assert.strictEqual((await raw('/api/lol/streamers', { method: 'POST', body: JSON.stringify({ riotId: 'Yok#TR1', kick: 'yokkanal' }) })).status, 404);
+  assert.strictEqual((await api('/api/lol/streamers')).length, 2);
+  const lm = await api('/api/lol/match/TR1_1001');
+  assert.deepStrictEqual(lm.streamers.map((x) => x.kick).sort(), ['rakipkanal', 'seyircikanal']);
+  assert.strictEqual(lm.map, 'Dereceli Tek/Çift');
+  console.log('LoL API OK');
   assert.strictEqual((await api('/api/streamers')).length, 4);
   const m1 = await api('/api/pubg/steam/match/m1');
   assert.deepStrictEqual(m1.streamers.map(s => s.kick).sort(), ['bobkanal', 'testkanal', 'xkanal']);
@@ -105,7 +159,7 @@ server.listen(4000, async () => {
   assert.strictEqual(await p.locator('.streamer-card').count(), 4);
   // platform seçimi ve "Ana sayfa" butonu yok; ilk ziyarette son görüntülenenler boş
   assert.strictEqual(await p.locator('select').count(), 0);
-  assert.strictEqual(await p.locator('nav').count(), 0);
+  assert.deepStrictEqual(await p.$$eval('.game-nav a', (els) => els.map((e) => [e.textContent, e.classList.contains('on')])), [['PUBG', true], ['LoL', false]]);
   assert.ok(await p.isHidden('#recent'));
   assert.ok(!(await p.textContent('.streamer-card')).includes('Steam'));
   await p.fill('#heroSearch input[name=name]', 'Me');
@@ -179,6 +233,45 @@ server.listen(4000, async () => {
   await p.waitForSelector('#recent .recent-chip');
   await p.click('#recent [data-remove="Me"]');
   assert.ok(await p.isHidden('#recent'));
+  // --- LoL: menüden geç, Riot ID ile ara (etiketsiz -> TR1), sadece birebir rakip kartları çıkmalı
+  await p.click('.game-nav a[data-game="lol"]');
+  await p.waitForSelector('.streamer-card');
+  assert.strictEqual(new URL(p.url()).pathname, '/lol');
+  assert.deepStrictEqual(await p.$$eval('.game-nav a.on', (els) => els.map((e) => e.textContent)), ['LoL']);
+  assert.strictEqual(await p.locator('.streamer-card').count(), 2);
+  assert.ok(await p.isHidden('#recent')); // PUBG'deki son görüntülenenler LoL'de görünmez
+  await p.fill('#heroSearch input[name=name]', 'Oyuncu');
+  await p.click('#heroSearch button');
+  await p.waitForSelector('.card', { timeout: 15000 });
+  assert.strictEqual(decodeURIComponent(new URL(p.url()).pathname), '/lol/players/Oyuncu#TR1');
+  const lrows = await p.$$eval('.card', (els) => els.map((e) => e.innerText.replace(/\s+/g, ' ')));
+  console.log(lrows);
+  assert.strictEqual(lrows.length, 2);
+  assert.ok(/Rakip tepkisi .*Öldürme Oyuncu#TR1 → Rakip#TR1 Ahri → Zed .*rakipkanal/i.test(lrows[0]), lrows[0]);
+  assert.ok(/Rakip tepkisi .*Ölüm Rakip#TR1 → Oyuncu#TR1 Zed → Ahri .*rakipkanal/i.test(lrows[1]), lrows[1]);
+  assert.ok(lrows.every((r) => !r.includes('seyircikanal') && !r.includes('Kule')));
+  const lhead = await p.textContent('.match-head');
+  assert.ok(lhead.includes('Zafer') && lhead.includes('Dereceli Tek/Çift') && lhead.includes('Ahri · 5/2/7') && !lhead.includes('seyircikanal'), lhead);
+  assert.deepStrictEqual(await p.$$eval('.tabs[data-key=type] button', (els) => els.map((e) => e.textContent)), ['Tümü', 'Öldürmeler', 'Ölümler']);
+  await shot('lol-player');
+  await p.click('.card >> nth=0');
+  await p.waitForFunction(() => /\d:\d\d/.test(document.querySelector('#modalInfo')?.textContent || ''));
+  // 22:05:00.1 − 10 sn = 22:04:50.1; kayıt 21:28:30'da başlıyor ve 30 sn kopuyor -> 35:50
+  const linfo = await p.textContent('#modalInfo');
+  assert.ok(linfo.includes('rakipkanal') && linfo.includes('Ahri → Zed') && linfo.includes('35:50'), linfo);
+  await p.keyboard.press('Escape');
+  await p.click('.brand');
+  await p.waitForSelector('#heroSearch');
+  // LoL ana sayfasındaki son görüntülenenler, PUBG'den ayrı
+  await p.goto('http://localhost:4000/lol');
+  await p.waitForSelector('#recent .recent-chip');
+  assert.deepStrictEqual(await p.$$eval('#recent .recent-chip a', (els) => els.map((e) => e.textContent)), ['Oyuncu#TR1']);
+  await shot('lol-home');
+  // bulunamayan Riot ID
+  await p.goto('http://localhost:4000/lol/players/' + encodeURIComponent('Yok#TR1'));
+  await p.waitForSelector('#pageStatus.error');
+  assert.ok((await p.textContent('#pageStatus')).includes('bulunamadı'));
+  console.log('LoL UI OK');
   // yayıncılar sayfası: menüde bağlantısı yok, sadece adresle açılır ve şifre ister
   assert.strictEqual(await p.locator('a[href="/streamers"]').count(), 0);
   await p.goto('http://localhost:4000/streamers');
@@ -193,6 +286,12 @@ server.listen(4000, async () => {
   await p.click('#loginForm button');
   await p.waitForSelector('.streamer-row');
   assert.strictEqual(await p.locator('.streamer-row').count(), 4);
+  await p.click('#adminTabs button[data-game="lol"]');
+  await p.waitForFunction(() => document.querySelectorAll('.streamer-row').length === 2);
+  assert.ok((await p.textContent('#streamerTable')).includes('Rakip#TR1'));
+  await shot('lol-admin');
+  await p.click('#adminTabs button[data-game="pubg"]');
+  await p.waitForFunction(() => document.querySelectorAll('.streamer-row').length === 4);
   await shot('streamers');
   // sayfa yenilenince giriş korunur, çıkışta tekrar şifre ister
   await p.reload();

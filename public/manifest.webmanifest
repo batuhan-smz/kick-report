@@ -2,7 +2,7 @@
   "id": "/",
   "name": "Kick Report",
   "short_name": "Kick Report",
-  "description": "PUBG ve LoL öldürme anlarını, karşılaşılan yayıncının Kick yayınından izle.",
+  "description": "Oyuncu adını yaz; öldürme ve ölüm anlarını aynı maçtaki Kick yayıncısının kaydından saniyesinde izle. PUBG ve LoL. Ücretsiz, hesap gerekmez.",
   "lang": "tr",
   "dir": "ltr",
   "start_url": "/",

@@ -78,9 +78,9 @@ const GAMES = {
   pubg: {
     id: 'pubg', label: 'PUBG', home: '/',
     clips: true, // abonelere özel kayıtlarda o anı kapsayan klipler aranır
-    heroTitle: 'PUBG anlarını <span>Kick</span> yayınlarında izle',
-    heroText: 'Bir oyuncu adı yaz. Bir yayıncıyı vurduğu ya da bir yayıncı tarafından vurulduğu anları, o yayıncının kendi yayınından görürsün: birebir tepkiler.',
-    placeholder: 'PUBG oyuncu adı (büyük/küçük harf önemli)',
+    heroTitle: 'Seni öldüren yayıncı <span>o an</span> ne dedi?',
+    heroText: 'PUBG oyuncu adını yaz. Son iki haftada maçlarında karşılaştığın Kick yayıncılarının kayıtları tam o saniyeden açılsın.',
+    placeholder: 'PUBG oyuncu adı, ör. F1ZYY_T (büyük/küçük harf önemli)',
     topPlaceholder: 'PUBG oyuncusu ara…',
     recentKey: 'kr_recent',
     streamersApi: '/api/streamers',
@@ -113,8 +113,8 @@ const GAMES = {
   },
   lol: {
     id: 'lol', label: 'LoL', home: '/lol',
-    heroTitle: 'LoL anlarını <span>Kick</span> yayınlarında izle',
-    heroText: 'Bir Riot ID yaz. Bir yayıncıyı öldürdüğü ya da bir yayıncıya öldüğü anları, o yayıncının kendi yayınından görürsün: birebir tepkiler.',
+    heroTitle: 'Seni öldüren yayıncı <span>o an</span> ne dedi?',
+    heroText: 'Riot ID\'ni yaz (Ad#TR1). Son maçlarında karşılaştığın Kick yayıncılarının kayıtları tam o saniyeden açılsın.',
     placeholder: 'Riot ID, örn. Ad#TR1 (etiket yoksa TR1 sayılır)',
     topPlaceholder: 'Riot ID ara (Ad#TR1)…',
     recentKey: 'kr_recent_lol',
@@ -402,7 +402,7 @@ function drawRecent(G) {
 
 // ---------- ana sayfa ----------
 async function homePage(G) {
-  document.title = G.id === 'lol' ? 'LoL · Kick Report' : 'Kick Report';
+  document.title = G.id === 'lol' ? 'LoL · Kick Report' : 'Kick Report | PUBG ve LoL anlarını Kick yayınından izle';
   const app = $('app');
   app.innerHTML = `
     <section class="hero">
@@ -410,8 +410,9 @@ async function homePage(G) {
       <p>${G.heroText}</p>
       <form id="heroSearch" class="search big">
         <input name="name" placeholder="${esc(G.placeholder)}" autocomplete="off" required>
-        <button type="submit">Ara</button>
+        <button type="submit">Anları bul</button>
       </form>
+      <p class="hero-meta">Ücretsiz · Hesap gerekmez<span id="heroCount"></span></p>
       <div id="recent" class="recent" hidden></div>
       ${DEMO && G.id === 'pubg' ? '<p class="note">Demo modu: PUBG verisi sahte, video ilk kayıtlı yayıncının gerçek Kick yayınından.</p>' : ''}
     </section>
@@ -431,6 +432,7 @@ async function homePage(G) {
     .sort((a, b) => (b.live - a.live) || String(b.verifiedAt || '').localeCompare(String(a.verifiedAt || '')))
     .slice(0, 24);
   $('streamerTotal').textContent = list.length ? `(${list.length})` : '';
+  $('heroCount').textContent = list.length ? ` · ${list.length} yayıncı listede` : '';
   grid.innerHTML = shown.length ? shown.map((s) => streamerCard(s, G)).join('') : `<div class="empty-box">${G.emptyStreamers}</div>`;
   hydrateAvatars(grid);
 }

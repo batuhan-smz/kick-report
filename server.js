@@ -107,6 +107,22 @@ const store = createStore({
 const SERVERLESS = store.kind === 'blob';
 const READ_TTL = SERVERLESS ? 15_000 : Infinity;
 const FRESH = SERVERLESS ? 0 : Infinity;
+// "Canlı" bilgisi bundan eskiyse yayıncı listesi istenirken Kick yeniden taranır (cron'u beklemeden)
+const LIVE_REFRESH_MS = Number(process.env.LIVE_REFRESH_MS || 3 * 60_000);
+
+// Yayıncı listesine canlı durumu ve izleyici sayısını ekle; canlılar (çok izlenen önde) en üstte
+async function withLive(list, d) {
+  if (d) {
+    await d.ensureLoaded(SERVERLESS ? 60_000 : Infinity).catch(() => {});
+    await d.refreshLive(LIVE_REFRESH_MS).catch((e) => console.log('canlı tarama:', e.message));
+  }
+  return list
+    .map((x) => {
+      const live = d ? d.isLive(x.kick) : false;
+      return { ...x, live, viewers: live ? d.viewers(x.kick) : null };
+    })
+    .sort((a, b) => (b.live - a.live) || ((b.viewers ?? -1) - (a.viewers ?? -1)));
+}
 
 // --- yayıncı kayıtları: oyun içi hesap -> Kick kanalı (her oyun için ayrı liste) ---
 // PUBG: { pubgName, shard, kick, ... }   LoL: { riotId, puuid, kick, ... }
@@ -321,8 +337,7 @@ async function handleApi(req, url, res) {
   if (parts[1] === 'streamers') {
     // live: şu an Kick'te PUBG yayını açık mı (son taramaya göre)
     if (req.method === 'GET' && !parts[2]) {
-      if (discovery) await discovery.ensureLoaded(SERVERLESS ? 60_000 : Infinity).catch(() => {});
-      return pubgReg.list.map((x) => ({ ...x, live: discovery ? discovery.isLive(x.kick) : false }));
+      return withLive(pubgReg.list, discovery);
     }
     requireAdmin(req);
     if (req.method === 'POST' && !parts[2]) {
@@ -359,8 +374,7 @@ async function handleApi(req, url, res) {
     // DELETE /api/lol/streamers/:puuid   -> kaydı sil                     (yönetici)
     if (parts[2] === 'streamers') {
       if (req.method === 'GET' && !parts[3]) {
-        if (lolDiscovery) await lolDiscovery.ensureLoaded(SERVERLESS ? 60_000 : Infinity).catch(() => {});
-        return lolReg.list.map((x) => ({ ...x, live: lolDiscovery ? lolDiscovery.isLive(x.kick) : false }));
+        return withLive(lolReg.list, lolDiscovery);
       }
       requireAdmin(req);
       if (req.method === 'POST' && !parts[3]) {

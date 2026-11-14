@@ -115,6 +115,23 @@ function createDiscovery(opts) {
     state.lastScanCount = seen.size;
   }
 
+  // Canlı bilgisi maxAgeMs'den eskiyse sadece Kick'i yeniden tara (PUBG/Riot kotası harcamaz).
+  // Zamanlanmış görev saatlerce gecikebildiği için "şu an canlı" listesini ziyaretçi istekleri taze tutar.
+  let refreshing = null;
+  function refreshLive(maxAgeMs) {
+    if (running || Date.now() - state.lastScan < maxAgeMs) return Promise.resolve();
+    if (!refreshing) {
+      refreshing = (async () => {
+        await load(); // başka bir örnek az önce taramış olabilir
+        if (Date.now() - state.lastScan < maxAgeMs) return;
+        await scan();
+        state.lastError = null;
+        await save();
+      })().finally(() => { refreshing = null; });
+    }
+    return refreshing;
+  }
+
   // --- 2-3. PUBG eşleştirme ---
   function due(c, now) {
     if (!live.has(c.slug)) return false;
@@ -256,7 +273,7 @@ function createDiscovery(opts) {
     };
   }
 
-  return { start, stop, tick, scan, lookups, reject, status, ensureLoaded, isLive: (slug) => live.has(slug), _state: () => state };
+  return { start, stop, tick, scan, refreshLive, lookups, reject, status, ensureLoaded, isLive: (slug) => live.has(slug), viewers: (slug) => live.get(slug)?.viewers ?? null, _state: () => state };
 }
 
 module.exports = { createDiscovery, candidateNames };

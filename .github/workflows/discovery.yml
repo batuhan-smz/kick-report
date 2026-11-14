@@ -1,4 +1,4 @@
-# Otomatik yayıncı bulma: Vercel'de arka plan işlemi olmadığı için GitHub her 30 dakikada bir
+# Otomatik yayıncı bulma: Vercel'de arka plan işlemi olmadığı için GitHub her 5 dakikada bir
 # sitedeki şifreli turu çağırır. Gerekli ayarlar (repo > Settings > Secrets and variables > Actions):
 #   Secret   CRON_SECRET : Vercel'deki CRON_SECRET ile aynı değer
 #   Variable SITE_URL    : sitenin adresi, ör. https://kick-report.vercel.app
@@ -6,7 +6,7 @@ name: Yayıncı keşfi
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 concurrency:

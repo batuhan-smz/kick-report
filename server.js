@@ -244,7 +244,7 @@ async function handleApi(req, url, res) {
   const parts = url.pathname.split('/').filter(Boolean); // ['api', ...]
   await loadStreamers();
 
-  // GET|POST /api/cron/discovery -> otomatik bulmanın bir turu (GitHub Actions her 30 dk çağırır)
+  // GET|POST /api/cron/discovery -> otomatik bulmanın bir turu (GitHub Actions her 5 dk çağırır)
   // Authorization: Bearer <CRON_SECRET>
   if (parts[1] === 'cron' && parts[2] === 'discovery') {
     const secret = process.env.CRON_SECRET;
@@ -543,8 +543,10 @@ const server = http.createServer(handler);
 // --- otomatik yayıncı bulma (DISCOVERY=0 ile kapatılır) ---
 const discovery = API_KEY && process.env.DISCOVERY !== '0' ? createDiscovery({
   store,
-  // Vercel'de tarama 30 dakikada bir yapılıyor; "canlı" bilgisi bir sonraki taramaya kadar geçerli sayılır
-  liveTtlMs: SERVERLESS ? 40 * 60_000 : undefined,
+  // Vercel'de tarama 5 dakikada bir (GitHub cron) yapılıyor. Her çağrıda tarasın diye eşik 2 dk;
+  // "canlı" bilgisi 15 dk geçerli (bir tur gecikse/atlansa da liste boşalmasın)
+  scanEveryMs: SERVERLESS ? 2 * 60_000 : undefined,
+  liveTtlMs: SERVERLESS ? 15 * 60_000 : undefined,
   kickBase: process.env.KICK_BASE || 'https://kick.com',
   rpm: PUBG_RPM,
   reserve: Number(process.env.DISCOVERY_RESERVE || 4),
@@ -576,7 +578,8 @@ const lolDiscovery = RIOT_API_KEY && process.env.DISCOVERY !== '0' ? createDisco
   store,
   storeKey: 'lol-discovery',
   category: 'league-of-legends',
-  liveTtlMs: SERVERLESS ? 40 * 60_000 : undefined,
+  scanEveryMs: SERVERLESS ? 2 * 60_000 : undefined,
+  liveTtlMs: SERVERLESS ? 15 * 60_000 : undefined,
   kickBase: process.env.KICK_BASE || 'https://kick.com',
   maxPages: Number(process.env.DISCOVERY_MAX_PAGES || 10),
   // Riot geliştirici anahtarı: 2 dakikada 100 istek. Dakikada en fazla 30, bunun 10'u kullanıcılara kalır.

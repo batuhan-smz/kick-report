@@ -13,7 +13,7 @@ Site Vercel'de, `main` dalına her `git push` sonrası otomatik yayınlanır.
 | Sayfalar (`public/`) | Vercel statik dosyaları |
 | API, `assetlinks.json` | Tek sunucusuz fonksiyon: `api/index.js` → `server.js` (bölge: `fra1`) |
 | Yayıncı listesi, keşif durumu | Özel Vercel Blob deposu `kick-report-data` (`store.js`) |
-| Otomatik bulma | GitHub Actions her 30 dk `/api/cron/discovery` çağırır (`.github/workflows/discovery.yml`) |
+| Otomatik bulma | GitHub Actions her 5 dk `/api/cron/discovery` çağırır (`.github/workflows/discovery.yml`) |
 
 Vercel ortam değişkenleri (Production): `PUBG_API_KEY`, `RIOT_API_KEY`, `ADMIN_PASSWORD`, `CRON_SECRET`, `TWA_SHA256`, `BLOB_READ_WRITE_TOKEN` (Blob deposu bağlanınca otomatik). GitHub Actions ayarları: secret `CRON_SECRET` (Vercel'dekiyle aynı), variable `SITE_URL`. Örnek: `.env.example`.
 

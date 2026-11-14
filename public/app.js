@@ -356,7 +356,7 @@ function streamerCard(s, G) {
   return `<a class="streamer-card" href="${G.playerPath(G.streamerName(s))}" data-link>
     ${avatarHTML(s)}
     <span class="sc-text"><b>${esc(s.kick)}</b><small>${esc(G.streamerName(s))}</small></span>
-    <span class="live-pill" data-live="${esc(s.kick)}" ${s.live ? '' : 'hidden'}>CANLI</span>
+    <span class="live-pill" data-live="${esc(s.kick)}" ${s.live ? '' : 'hidden'}>${s.live && s.viewers != null ? `CANLI · ${s.viewers}` : 'CANLI'}</span>
   </a>`;
 }
 
@@ -427,14 +427,29 @@ async function homePage(G) {
   const list = await loadStreamers(G);
   if (my !== runId) return;
   const grid = $('homeStreamers');
-  // önce şu an canlı olanlar, sonra en son doğrulananlar
-  const shown = [...list]
-    .sort((a, b) => (b.live - a.live) || String(b.verifiedAt || '').localeCompare(String(a.verifiedAt || '')))
-    .slice(0, 24);
+  // önce şu an canlı olanlar (çok izleyicisi olan önde), sonra en son doğrulananlar
+  const byLive = (a, b) => (!!b.live - !!a.live) || ((b.viewers ?? -1) - (a.viewers ?? -1)) ||
+    String(b.verifiedAt || '').localeCompare(String(a.verifiedAt || ''));
+  const shown = [...list].sort(byLive).slice(0, 24);
   $('streamerTotal').textContent = list.length ? `(${list.length})` : '';
   $('heroCount').textContent = list.length ? ` · ${list.length} yayıncı listede` : '';
-  grid.innerHTML = shown.length ? shown.map((s) => streamerCard(s, G)).join('') : `<div class="empty-box">${G.emptyStreamers}</div>`;
-  hydrateAvatars(grid);
+  const draw = () => {
+    grid.innerHTML = shown.length ? shown.map((s) => streamerCard(s, G)).join('') : `<div class="empty-box">${G.emptyStreamers}</div>`;
+    hydrateAvatars(grid);
+  };
+  draw();
+  if (!shown.length) return;
+  // Sunucunun canlı bilgisi son taramaya dayanır; Kick'ten anlık durumu alıp
+  // canlı olanları en üste taşı (sıra değiştiyse listeyi yeniden çiz)
+  await Promise.allSettled(shown.map((s) => getKickChannel(s.kick).then((c) => {
+    s.live = c.live;
+    s.viewers = c.live ? c.viewers : null;
+    if (!s.avatar && c.avatar) s.avatar = c.avatar;
+  })));
+  if (my !== runId || !document.body.contains(grid)) return;
+  const before = shown.map((s) => s.kick).join();
+  shown.sort(byLive);
+  if (before !== shown.map((s) => s.kick).join() || shown.some((s) => s.live)) draw();
 }
 
 // ---------- yayıncılar sayfası (yönetici) ----------
